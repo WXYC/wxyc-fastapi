@@ -8,8 +8,8 @@ The motivation, drift inventory, phasing (A → E), and decisions are in [the wi
 
 Phase A (issue [#2](https://github.com/WXYC/wxyc-fastapi/issues/2)) is split across three sequential PRs:
 
-1. **PR 1 (this branch)**: package scaffolding + `cache_stats` module
-2. **PR 2**: `sentry` + `posthog` modules (depends on PR 1)
+1. **PR 1**: package scaffolding + `cache_stats` module
+2. **PR 2 (this branch)**: `sentry` + `posthog` modules (depends on PR 1)
 3. **PR 3**: `telemetry` module (depends on PR 1's `cache_stats`)
 
 All three roll up into the v0.1.0 PyPI release, tagged after PR 3 merges.
@@ -39,30 +39,41 @@ tests/
 
 ## Public API surface (this branch)
 
-PR 1 ships only the `cache_stats` symbols. Consumers should import from `wxyc_fastapi.observability`, not the submodule:
+PR 2 ships `cache_stats` (from PR 1) plus the new `sentry` and `posthog` modules. Consumers should import from `wxyc_fastapi.observability`, not the submodules:
 
 ```python
 from wxyc_fastapi.observability import (
-    init_cache_stats,
-    get_cache_stats_recorder,
-    get_cache_stats,
-    CacheStatsRecorder,
-    timed_pg,
-    timed_api,
+    # cache_stats (PR 1)
+    init_cache_stats, get_cache_stats_recorder, get_cache_stats,
+    CacheStatsRecorder, timed_pg, timed_api,
+    # sentry (PR 2)
+    init_sentry, add_breadcrumb, capture_exception,
+    # posthog (PR 2)
+    get_posthog_client, flush_posthog, shutdown_posthog,
 )
 ```
 
-## Cache stats: per-consumer parameterization
+## Per-consumer parameterization
 
-`init_cache_stats` seeds the per-request stats dict with six base keys (`memory_hits`, `pg_hits`, `pg_misses`, `api_calls`, `pg_time_ms`, `api_time_ms`). Pass `extra_keys=[...]` to add consumer-specific metrics:
+When migrating a consumer, the per-consumer values are:
 
-| Consumer | `init_cache_stats(extra_keys=...)` |
-|---|---|
-| LML | `None` |
-| rom | `["memory_misses"]` |
-| semantic-index | `None` |
+| Parameter | LML | rom | semantic-index |
+|---|---|---|---|
+| `init_sentry(service_name=...)` | `"library-metadata-lookup"` | `"request-o-matic"` | `"semantic-index"` |
+| `init_cache_stats(extra_keys=...)` | `None` | `["memory_misses"]` | `None` |
+| `get_posthog_client(event_prefix=...)` | `"lookup"` | `"request"` | `"explore"` (no-op; semantic-index doesn't install the `[posthog]` extra) |
 
-`CacheStatsRecorder` exposes well-named helpers (`record_memory_cache_hit`, `record_pg_cache_miss`, `record_pg_time(ms)`, ...) plus a generic `record(key, value)` for keys passed via `extra_keys`. All recorder methods are no-ops when `init_cache_stats()` has not been called for the current async context, so library code can call them unconditionally.
+`HttpxIntegration` is default-on in `init_sentry` — see CHANGELOG's "Consumer impact" line. Pass `integrations=[FastApiIntegration()]` to opt out.
+
+## Cache stats: behavior recap
+
+`init_cache_stats` seeds the per-request stats dict with six base keys (`memory_hits`, `pg_hits`, `pg_misses`, `api_calls`, `pg_time_ms`, `api_time_ms`); `extra_keys=[...]` adds consumer-specific metrics. `CacheStatsRecorder` exposes well-named helpers (`record_memory_cache_hit`, `record_pg_cache_miss`, `record_pg_time(ms)`, ...) plus a generic `record(key, value)` for keys passed via `extra_keys`. All recorder methods are no-ops when `init_cache_stats()` has not been called for the current async context, so library code can call them unconditionally.
+
+## PostHog wrapper
+
+`get_posthog_client(event_prefix)` returns a lazy singleton. The `event_prefix` argument is purely diagnostic — it surfaces in the warn-once log line that fires when `POSTHOG_API_KEY` is missing, so co-located services each get one warning instead of one per call. The returned client is shared across callers; events are **not** auto-prefixed.
+
+The `posthog` SDK is imported inside `get_posthog_client` on first successful call (when an API key is set). Consumers that never call it do not need the `[posthog]` extra installed — semantic-index relies on this.
 
 ## Versioning
 
@@ -94,7 +105,7 @@ python3.12 -m venv .venv
 ### Test + lint
 
 ```bash
-.venv/bin/pytest                       # 17 tests at PR 1; grows to 58 at PR 3
+.venv/bin/pytest                       # 44 tests at PR 2 (cache_stats + sentry + posthog); grows to 58 at PR 3
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
 ```
