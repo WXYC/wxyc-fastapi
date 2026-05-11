@@ -19,21 +19,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from wxyc_fastapi.observability.cache_stats import get_cache_stats
+from wxyc_fastapi.observability.cache_stats import _BASE_KEYS, get_cache_stats
 
 if TYPE_CHECKING:
     from posthog import Posthog
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CACHE_STATS: dict[str, float] = {
-    "memory_hits": 0,
-    "pg_hits": 0,
-    "pg_misses": 0,
-    "api_calls": 0,
-    "pg_time_ms": 0.0,
-    "api_time_ms": 0.0,
-}
+# Sourced from cache_stats so the two modules can't drift if the base set
+# changes in a later phase. Kept as a module constant rather than rebuilt per
+# call since it's the fallback for an uninitialized request.
+_DEFAULT_CACHE_STATS: dict[str, float] = dict.fromkeys(_BASE_KEYS, 0)
 
 
 @dataclass
