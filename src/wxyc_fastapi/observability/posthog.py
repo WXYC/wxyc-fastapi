@@ -74,7 +74,10 @@ def flush_posthog() -> None:
 def shutdown_posthog() -> None:
     """Shut down the PostHog client and clear the singleton.
 
-    Safe no-op when no client is initialized.
+    Safe no-op when no client is initialized. Note that ``_warned_prefixes`` is
+    intentionally **not** cleared — the warn-once contract is per-process, not
+    per-client-lifecycle, so a process that shuts down and re-initializes a
+    client will not re-warn for the same caller.
     """
     global _client
     if _client is not None:
