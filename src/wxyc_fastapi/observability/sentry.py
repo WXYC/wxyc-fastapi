@@ -19,12 +19,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
 from sentry_sdk.integrations import Integration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.httpx import HttpxIntegration
+
+if TYPE_CHECKING:
+    from sentry_sdk.types import Event, Hint
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,7 @@ def init_sentry(
     environment: str = "local",
     release: str | None = None,
     integrations: list[Integration] | None = None,
-    before_send: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | None] | None = None,
+    before_send: Callable[[Event, Hint], Event | None] | None = None,
     traces_sample_rate: float = 1.0,
     sample_rate: float = 1.0,
 ) -> None:
@@ -58,8 +61,10 @@ def init_sentry(
             ``FastApiIntegration`` and ``HttpxIntegration`` are enabled.
             ``HttpxIntegration`` being default-on is a deliberate change from
             LML's prior behavior — see CHANGELOG for the consumer-impact note.
-        before_send: Optional event filter. Return ``None`` to drop an event;
-            return the (possibly modified) event dict to forward it.
+        before_send: Optional event filter. Receives a ``sentry_sdk.types.Event``
+            and ``Hint``; return ``None`` to drop an event or return the
+            (possibly modified) Event to forward it. Useful for filtering
+            handled-error classes that you log but don't want tracked in Sentry.
         traces_sample_rate: Performance-tracing sample rate (0.0-1.0). Default 1.0.
         sample_rate: Error-event sample rate (0.0-1.0). Default 1.0.
     """
