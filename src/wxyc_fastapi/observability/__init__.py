@@ -1,11 +1,4 @@
-"""Observability primitives for WXYC FastAPI services.
-
-Phase A is split across three PRs; symbols become available as each lands:
-
-- PR 1: ``cache_stats``
-- PR 2 (this commit): ``sentry``, ``posthog``
-- PR 3: ``telemetry``
-"""
+"""Observability primitives: Sentry init, request telemetry, cache-stats recorder, PostHog wrapper."""
 
 from wxyc_fastapi.observability.cache_stats import (
     CacheStatsRecorder,
@@ -25,9 +18,15 @@ from wxyc_fastapi.observability.sentry import (
     capture_exception,
     init_sentry,
 )
+from wxyc_fastapi.observability.telemetry import (
+    RequestTelemetry,
+    StepResult,
+)
 
 __all__ = [
     "CacheStatsRecorder",
+    "RequestTelemetry",
+    "StepResult",
     "add_breadcrumb",
     "capture_exception",
     "flush_posthog",

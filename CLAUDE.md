@@ -6,13 +6,11 @@
 
 The motivation, drift inventory, phasing (A → E), and decisions are in [the wiki plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md). Project board: [WXYC #29](https://github.com/orgs/WXYC/projects/29). Epic: [#1](https://github.com/WXYC/wxyc-fastapi/issues/1).
 
-Phase A (issue [#2](https://github.com/WXYC/wxyc-fastapi/issues/2)) is split across three sequential PRs:
+Phase A (issue [#2](https://github.com/WXYC/wxyc-fastapi/issues/2)) shipped across three sequential PRs:
 
 1. **PR 1**: package scaffolding + `cache_stats` module
-2. **PR 2 (this branch)**: `sentry` + `posthog` modules (depends on PR 1)
-3. **PR 3**: `telemetry` module (depends on PR 1's `cache_stats`)
-
-All three roll up into the v0.1.0 PyPI release, tagged after PR 3 merges.
+2. **PR 2**: `sentry` + `posthog` modules
+3. **PR 3 (this branch)**: `telemetry` module — completes the v0.1.0 surface, tag cut after merge.
 
 ## Layout
 
@@ -37,30 +35,31 @@ tests/
     └── test_telemetry.py    # PR 3
 ```
 
-## Public API surface (this branch)
+## Public API surface
 
-PR 2 ships `cache_stats` (from PR 1) plus the new `sentry` and `posthog` modules. Consumers should import from `wxyc_fastapi.observability`, not the submodules:
+PR 3 completes the v0.1.0 surface. Consumers should import from `wxyc_fastapi.observability`, not the submodules:
 
 ```python
 from wxyc_fastapi.observability import (
-    # cache_stats (PR 1)
-    init_cache_stats, get_cache_stats_recorder, get_cache_stats,
-    CacheStatsRecorder, timed_pg, timed_api,
-    # sentry (PR 2)
     init_sentry, add_breadcrumb, capture_exception,
-    # posthog (PR 2)
+    RequestTelemetry, StepResult,
+    init_cache_stats, get_cache_stats_recorder, get_cache_stats, CacheStatsRecorder,
+    timed_pg, timed_api,
     get_posthog_client, flush_posthog, shutdown_posthog,
 )
 ```
 
 ## Per-consumer parameterization
 
-When migrating a consumer, the per-consumer values are:
+The shared modules are parameterized so each consumer can keep its existing taxonomy. When migrating a consumer, the per-consumer values are:
 
 | Parameter | LML | rom | semantic-index |
 |---|---|---|---|
 | `init_sentry(service_name=...)` | `"library-metadata-lookup"` | `"request-o-matic"` | `"semantic-index"` |
 | `init_cache_stats(extra_keys=...)` | `None` | `["memory_misses"]` | `None` |
+| `RequestTelemetry.api_call_keys` | `["discogs"]` | `["groq", "discogs", "slack"]` | `[]` |
+| `RequestTelemetry.distinct_id` | `"library-metadata-lookup-service"` | `"request-o-matic-service"` | `"semantic-index-service"` |
+| `RequestTelemetry.event_prefix` | `"lookup"` | `"request"` | `"explore"` |
 | `get_posthog_client(event_prefix=...)` | `"lookup"` | `"request"` | `"explore"` (no-op; semantic-index doesn't install the `[posthog]` extra) |
 
 `HttpxIntegration` is default-on in `init_sentry` — see CHANGELOG's "Consumer impact" line. Pass `integrations=[FastApiIntegration()]` to opt out.
@@ -76,6 +75,12 @@ When migrating a consumer, the per-consumer values are:
 `get_posthog_client(event_prefix)` returns a lazy singleton. The `event_prefix` argument is purely diagnostic — it surfaces in the warn-once log line that fires when `POSTHOG_API_KEY` is missing, so co-located services each get one warning instead of one per call. The returned client is shared across callers; events are **not** auto-prefixed.
 
 The `posthog` SDK is imported inside `get_posthog_client` on first successful call (when an API key is set). Consumers that never call it do not need the `[posthog]` extra installed — semantic-index relies on this.
+
+## Telemetry
+
+`RequestTelemetry(api_call_keys, distinct_id, event_prefix)` tracks step timings + per-service API-call counts for a single request. The `event_prefix` namespaces the emitted PostHog events: `lookup` produces `lookup_<step>` per-step events and a `lookup_completed` summary; `request` produces `request_<step>` and `request_completed`.
+
+`track_step` is a context manager that records duration even when the body raises (it re-raises after stamping `error_type`). `send_to_posthog` reads cache stats from `cache_stats.get_cache_stats()` so telemetry and cache-recording stay decoupled — consumers initialize cache stats and telemetry independently per request.
 
 ## Versioning
 
@@ -107,7 +112,7 @@ python3.12 -m venv .venv
 ### Test + lint
 
 ```bash
-.venv/bin/pytest                       # 44 tests at PR 2 (cache_stats + sentry + posthog); grows to 58 at PR 3
+.venv/bin/pytest                       # 58 tests across all four modules
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
 ```
@@ -131,6 +136,16 @@ Tag-pushed: `git tag v0.1.0 && git push origin v0.1.0` triggers `.github/workflo
 The PyPI Trusted Publisher relationship must be configured once in the PyPI UI before the first tag push (project name `wxyc-fastapi`, owner `WXYC`, repo `wxyc-fastapi`, workflow `publish.yml`, environment `pypi`).
 
 CHANGELOG.md must be updated for every PR. The "Consumer impact" subsection is non-optional when the change affects a consumer's observable behavior (e.g., the `HttpxIntegration` default-on flip in PR 2's sentry module).
+
+## Migration playbook (for consumer-side tickets A2/A3/A4)
+
+1. Add `wxyc-fastapi[posthog]>=0.1,<0.2` to `pyproject.toml`.
+2. Replace `core/sentry.py` with `from wxyc_fastapi.observability import init_sentry, add_breadcrumb, capture_exception`. The breadcrumb call sites need to pass `category=` explicitly (existing rom/LML hard-coded `"discogs"`).
+3. Replace `core/telemetry.py` `RequestTelemetry()` constructor sites with the parameterized version (see table above).
+4. Replace cache-stats `record_*` free functions with `get_cache_stats_recorder().record_*` method calls. The ContextVar location does not change (per-request stats still live in the per-context dict).
+5. Replace ad-hoc PostHog client construction with `get_posthog_client(event_prefix)`.
+6. Delete the old local `core/sentry.py` and `core/telemetry.py` files.
+7. Run the consumer's existing test suite — no behavior changes are expected except the `HttpxIntegration` default-on flip (LML only).
 
 ## Related repos
 
