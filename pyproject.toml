@@ -1,0 +1,89 @@
+[project]
+name = "wxyc-fastapi"
+version = "0.1.0"
+description = "Shared FastAPI service primitives for WXYC: Sentry init, request telemetry, cache-stats recorder, PostHog wrapper"
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "WXYC Engineering" },
+]
+keywords = ["fastapi", "sentry", "posthog", "telemetry", "wxyc"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "fastapi>=0.110",
+    "httpx>=0.25",
+    "sentry-sdk[fastapi]>=2.0",
+]
+
+[project.optional-dependencies]
+posthog = [
+    "posthog>=3.0",
+]
+asyncpg = [
+    "asyncpg>=0.29",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "posthog>=3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/WXYC/wxyc-fastapi"
+Repository = "https://github.com/WXYC/wxyc-fastapi"
+Issues = "https://github.com/WXYC/wxyc-fastapi/issues"
+Changelog = "https://github.com/WXYC/wxyc-fastapi/blob/main/CHANGELOG.md"
+Plan = "https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md"
+
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["wxyc_fastapi*"]
+
+[tool.setuptools.package-data]
+wxyc_fastapi = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line too long
+    "B008",  # do not perform function calls in argument defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["N802", "N803", "N806"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+asyncio_mode = "auto"
+console_output_style = "progress"
