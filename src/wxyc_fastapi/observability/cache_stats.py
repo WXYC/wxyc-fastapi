@@ -9,6 +9,12 @@ The base set covers the metrics every WXYC FastAPI service tracks:
 ``memory_hits``, ``pg_hits``, ``pg_misses``, ``api_calls``, ``pg_time_ms``,
 ``api_time_ms``. Consumers can extend the set via ``extra_keys`` (rom adds
 ``memory_misses``).
+
+``extra_keys`` is a *shape guarantee* — it ensures the named keys appear in
+``get_cache_stats()`` with value ``0`` even when never recorded, so PostHog
+event shapes stay stable across requests. It is not a permission system:
+``CacheStatsRecorder.record(key, value)`` will create the key on first call
+regardless of whether it was declared.
 """
 
 from __future__ import annotations
@@ -36,7 +42,9 @@ def init_cache_stats(extra_keys: Iterable[str] | None = None) -> None:
     Args:
         extra_keys: Additional keys to seed in the stats dict (initial value 0).
             Use this when a consumer tracks metrics beyond the base set
-            (e.g., rom tracks ``memory_misses``).
+            (e.g., rom tracks ``memory_misses``). Seeding is a shape guarantee
+            for downstream PostHog events, not a permission gate — recorder
+            methods can create undeclared keys on first call.
     """
     stats: dict[str, float] = dict.fromkeys(_BASE_KEYS, 0)
     if extra_keys:

@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # No `branches:` filter on PRs so stacked / chained PRs (base != main) still
+  # get CI signal. The `push` trigger above stays main-only since we only
+  # publish-tag from main.
   pull_request:
-    branches: [main]
 
 jobs:
   lint:

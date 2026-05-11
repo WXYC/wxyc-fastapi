@@ -54,7 +54,7 @@ from wxyc_fastapi.observability import (
 
 ## Cache stats: per-consumer parameterization
 
-`init_cache_stats` seeds the per-request stats dict with six base keys (`memory_hits`, `pg_hits`, `pg_misses`, `api_calls`, `pg_time_ms`, `api_time_ms`). Pass `extra_keys=[...]` to add consumer-specific metrics:
+`init_cache_stats` seeds the per-request stats dict with six base keys (`memory_hits`, `pg_hits`, `pg_misses`, `api_calls`, `pg_time_ms`, `api_time_ms`). Pass `extra_keys=[...]` to seed additional consumer-specific keys:
 
 | Consumer | `init_cache_stats(extra_keys=...)` |
 |---|---|
@@ -62,7 +62,9 @@ from wxyc_fastapi.observability import (
 | rom | `["memory_misses"]` |
 | semantic-index | `None` |
 
-`CacheStatsRecorder` exposes well-named helpers (`record_memory_cache_hit`, `record_pg_cache_miss`, `record_pg_time(ms)`, ...) plus a generic `record(key, value)` for keys passed via `extra_keys`. All recorder methods are no-ops when `init_cache_stats()` has not been called for the current async context, so library code can call them unconditionally.
+`extra_keys` is a *shape guarantee* — it makes sure the named keys appear in `get_cache_stats()` with value `0` even when never recorded, so PostHog event shapes stay stable across requests. It is not a permission system: `recorder.record(key, value)` and the named helpers (e.g. `record_memory_cache_miss`) will create undeclared keys on first call.
+
+`CacheStatsRecorder` exposes well-named helpers (`record_memory_cache_hit`, `record_pg_cache_miss`, `record_pg_time(ms)`, ...) plus a generic `record(key, value)` for ad-hoc metrics. All recorder methods are no-ops when `init_cache_stats()` has not been called for the current async context, so library code can call them unconditionally.
 
 ## Versioning
 
