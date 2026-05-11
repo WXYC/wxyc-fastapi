@@ -120,9 +120,10 @@ class TestRecorder:
 
         asyncio.run(check())
 
-    def test_record_unknown_key_is_silent_noop(self):
-        # Unknown key on initialized stats should add it (dicts are open by design;
-        # extra_keys is a hint for what the consumer cares about, not a constraint).
+    def test_record_undeclared_key_creates_entry(self):
+        # The stats dict is open by design: extra_keys is a "shape guarantee" for
+        # downstream consumers reading get_cache_stats() — not a permission gate.
+        # Recording an undeclared key adds it on first call.
         init_cache_stats()
         rec = get_cache_stats_recorder()
         rec.record("unexpected", 5)
