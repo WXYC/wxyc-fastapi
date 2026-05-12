@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file. Format foll
 
 Test-only changes against the Phase C conformance fixture; no public API additions and no version bump beyond what 0.3.0 ships.
 
+## [0.3.1] - 2026-05-12
+
+Re-publish of v0.3.0 — the v0.3.0 tag failed to publish because `pyproject.toml` was still pinned to `0.2.0`, so the build produced a wheel name that already existed on PyPI. v0.3.1 carries the same code (the `http.singleton` module) under a clean version. Consumers should pin `wxyc-fastapi[posthog]>=0.3.0,<0.4.0`; v0.3.1 satisfies the range.
+
+[0.3.1]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v0.3.1
+
 ### Added
 - `tests/healthcheck/test_conformance.py` — Phase C conformance test ([WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4)) asserting that the local Pydantic `ReadinessResponse` model in `wxyc_fastapi.healthcheck.readiness` and the `HealthCheckResponse` / `ReadinessResponse` schemas in [`wxyc-shared/api.yaml@v0.13.0`](https://github.com/WXYC/wxyc-shared/blob/v0.13.0/api.yaml) agree on the `status` enum (`healthy`/`degraded`/`unhealthy`), the per-service value enum (`ok`/`unavailable`/`timeout`), the required-fields surface, and the `additionalProperties: true` openness. Three round-trip cases (healthy/degraded/unhealthy) validate the same payload through both schemas via `jsonschema` and the Pydantic model so the test fails if either side accepts what the other rejects. A breaking change to either side fails CI here.
 - `tests/healthcheck/fixtures/api-yaml-schemas.json` — vendored snapshot of the two component schemas at the pinned wxyc-shared tag. Refresh with `python scripts/sync-api-yaml-schemas.py --ref vX.Y.Z`.

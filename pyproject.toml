@@ -1,6 +1,6 @@
 [project]
 name = "wxyc-fastapi"
-version = "0.2.0"
+version = "0.3.1"
 description = "Shared FastAPI service primitives for WXYC: Sentry init, request telemetry, cache-stats recorder, PostHog wrapper"
 requires-python = ">=3.12"
 readme = "README.md"
