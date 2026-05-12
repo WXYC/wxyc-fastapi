@@ -21,9 +21,9 @@ jobs:
       - name: Install dev deps
         run: pip install -e '.[dev,posthog]'
       - name: ruff check
-        run: ruff check src tests
+        run: ruff check src tests scripts
       - name: ruff format --check
-        run: ruff format --check src tests
+        run: ruff format --check src tests scripts
 
   test:
     name: Tests
