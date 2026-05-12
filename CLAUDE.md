@@ -27,7 +27,9 @@ src/wxyc_fastapi/
 │   ├── __init__.py        # re-exports
 │   ├── liveness.py        # liveness_router (GET /health)
 │   └── readiness.py       # readiness_router(checks, *, timeout=...) factory + Check dataclass
-├── http/                  # v0.3.0 — Phase D (pending)
+├── http/                  # v0.3.0 — Phase D
+│   ├── __init__.py        # re-exports
+│   └── singleton.py       # async_singleton(factory) -> (getter, closer)
 └── db/                    # v1.0.0 — Phase E (pending)
 tests/
 ├── conftest.py            # cache-stats ContextVar isolation fixture
@@ -36,12 +38,14 @@ tests/
 │   ├── test_sentry.py       # PR 2
 │   ├── test_posthog.py      # PR 2
 │   └── test_telemetry.py    # PR 3
-└── healthcheck/
-    ├── fixtures/
-    │   └── api-yaml-schemas.json   # Phase C: vendored wxyc-shared schemas
-    ├── test_conformance.py         # Phase C: api.yaml ↔ ReadinessResponse parity
-    ├── test_liveness.py
-    └── test_readiness.py
+├── healthcheck/
+│   ├── fixtures/
+│   │   └── api-yaml-schemas.json   # Phase C: vendored wxyc-shared schemas
+│   ├── test_conformance.py         # Phase C: api.yaml ↔ ReadinessResponse parity
+│   ├── test_liveness.py
+│   └── test_readiness.py
+└── http/
+    └── test_singleton.py           # Phase D: LML#241 reproducer + closer + retry semantics
 scripts/
 └── sync-api-yaml-schemas.py        # refresh the conformance fixture from a wxyc-shared tag
 ```
@@ -99,7 +103,7 @@ The `posthog` SDK is imported inside `get_posthog_client` on first successful ca
 |---|---|---|
 | 0.1.0 | A | observability/ (cache_stats + sentry + posthog + telemetry; ships after PR 3) |
 | 0.2.0 | B | healthcheck/ |
-| 0.3.0 | D | http/singleton + db/lazy-pool init |
+| 0.3.0 | D | http/singleton (async-singleton + lock helper) |
 | 1.0.0 | E | db/lazy_pg with double-check-lock pattern |
 
 The package follows SemVer; consumers pin a minor range (`wxyc-fastapi>=0.1,<0.2`) until 1.0.
@@ -123,7 +127,7 @@ python3.12 -m venv .venv
 ### Test + lint
 
 ```bash
-.venv/bin/pytest                       # 103 tests across observability + healthcheck (incl. Phase C conformance)
+.venv/bin/pytest                       # 114 tests across observability + healthcheck + http (incl. Phase C conformance)
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
 ```
@@ -175,6 +179,16 @@ python scripts/sync-api-yaml-schemas.py --ref vX.Y.Z
 This rewrites `tests/healthcheck/fixtures/api-yaml-schemas.json` from `https://raw.githubusercontent.com/WXYC/wxyc-shared/<ref>/api.yaml`. Then update `_PINNED_REF` in `test_conformance.py` to match (the test re-asserts the pin) and commit both together. If the refresh exposes a real conformance gap (the test starts failing on the new fixture), decide deliberately whether to update the local Pydantic model or push back on the wxyc-shared change — the failure mode is the test catching a contract drift, not a bug in the test.
 
 The script and the conformance test depend on `jsonschema>=4.21` and `pyyaml>=6.0` from the `[dev]` extra.
+
+## Http singleton
+
+`wxyc_fastapi.http.async_singleton(factory)` returns a `(getter, closer)` pair backing a lazy async singleton. The getter implements double-check-lock so concurrent first-callers see exactly one `factory()` invocation — without that lock, every caller passes the outer `is None` check, each constructs a fresh client/pool, and only one survives as the cached value while the others are orphaned with their connections (and FDs) still open. This is the FD-leak race documented in [LML#241](https://github.com/WXYC/library-metadata-lookup/issues/241) and fixed in [LML#242](https://github.com/WXYC/library-metadata-lookup/pull/242); extracting the pattern here means the next async singleton can't be written without the lock.
+
+The closer dispatches teardown across the three shapes seen in WXYC's stack: `aclose()` (httpx `AsyncClient`), `close()` returning a coroutine (`asyncpg.Pool`), and `close()` returning `None` (sync, e.g. `posthog.Posthog`). It captures-then-clears the cached instance before invoking teardown so a concurrent `await getter()` rebuilds via the factory rather than racing against a half-torn-down resource.
+
+Factory exception leaves the singleton unset and releases the lock (via `async with`), so the next `await getter()` retries — a single transient init failure must not permanently wedge the service into a half-built state.
+
+The headline regression test is `tests/http/test_singleton.py::TestConcurrentFirstCallers::test_factory_invoked_once_under_concurrency`: 50 concurrent first-callers must see one factory invocation. Removing `async with lock:` from `singleton.py` fails it (50 invocations instead of 1).
 
 ## Migration playbook (for consumer-side tickets A2/A3/A4)
 
