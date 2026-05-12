@@ -37,6 +37,11 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.4",
     "posthog>=3.0",
+    # Used by the Phase C conformance test (`tests/healthcheck/test_conformance.py`)
+    # and the `scripts/sync-api-yaml-schemas.py` fixture refresher. See CLAUDE.md
+    # "Conformance test" section.
+    "jsonschema>=4.21",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]

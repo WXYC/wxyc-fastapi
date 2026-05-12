@@ -1,0 +1,51 @@
+{
+  "_source": "https://raw.githubusercontent.com/WXYC/wxyc-shared/v0.13.0/api.yaml",
+  "_pinned_version": "v0.13.0",
+  "HealthCheckResponse": {
+    "type": "object",
+    "description": "Liveness response shape for `GET /health` (and equivalent) endpoints.\nCross-language contract owned by `wxyc-fastapi` (Python) and adopted\nby Backend-Service (Node) via generated TS types.\n\n`additionalProperties: true` lets services attach extra fields without\nbreaking consumers; semantic-index, for example, returns `artist_count`\nalongside `status`.\n",
+    "required": [
+      "status"
+    ],
+    "properties": {
+      "status": {
+        "type": "string",
+        "enum": [
+          "healthy",
+          "degraded",
+          "unhealthy"
+        ],
+        "description": "Service-reported health. `healthy` = fully operational; `degraded`\n= serving but with reduced capability; `unhealthy` = should not\nreceive traffic.\n"
+      }
+    },
+    "additionalProperties": true
+  },
+  "ReadinessResponse": {
+    "description": "Readiness response shape for `GET /ready` (and equivalent) endpoints.\nExtends `HealthCheckResponse` with a per-dependency status map.\nEach entry in `services` reports the live state of one external\ndependency (database, upstream HTTP service, queue, etc.).\n\nStatus values:\n  - `ok`          — dependency reachable and responsive\n  - `unavailable` — dependency reachable but reporting an error,\n                    or the connection itself failed\n  - `timeout`     — dependency exceeded the readiness probe deadline\n",
+    "allOf": [
+      {
+        "$ref": "#/components/schemas/HealthCheckResponse"
+      },
+      {
+        "type": "object",
+        "required": [
+          "services"
+        ],
+        "properties": {
+          "services": {
+            "type": "object",
+            "description": "Per-dependency readiness map keyed by dependency name.",
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "unavailable",
+                "timeout"
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

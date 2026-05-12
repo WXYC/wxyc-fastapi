@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Test-only changes; no public API additions and no version bump. v0.2.0 ships unchanged.
+
+### Added
+- `tests/healthcheck/test_conformance.py` — Phase C conformance test ([WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4)) asserting that the local Pydantic `ReadinessResponse` model in `wxyc_fastapi.healthcheck.readiness` and the `HealthCheckResponse` / `ReadinessResponse` schemas in [`wxyc-shared/api.yaml@v0.13.0`](https://github.com/WXYC/wxyc-shared/blob/v0.13.0/api.yaml) agree on the `status` enum (`healthy`/`degraded`/`unhealthy`), the per-service value enum (`ok`/`unavailable`/`timeout`), the required-fields surface, and the `additionalProperties: true` openness. Three round-trip cases (healthy/degraded/unhealthy) validate the same payload through both schemas via `jsonschema` and the Pydantic model so the test fails if either side accepts what the other rejects. A breaking change to either side fails CI here.
+- `tests/healthcheck/fixtures/api-yaml-schemas.json` — vendored snapshot of the two component schemas at the pinned wxyc-shared tag. Refresh with `python scripts/sync-api-yaml-schemas.py --ref vX.Y.Z`.
+- `scripts/sync-api-yaml-schemas.py` — CLI to refresh the fixture from a configurable wxyc-shared git ref.
+- `[dev]` extra picks up `jsonschema>=4.21` and `pyyaml>=6.0` for the conformance test and the sync script.
+
 ## [0.2.0] - Unreleased
 
 Phase B of the [wxyc-fastapi plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md): the `healthcheck` package — a single `liveness_router` plus a parameterized `readiness_router(checks, *, timeout=...)` that runs probes concurrently with per-probe timeouts and aggregates `healthy`/`degraded`/`unhealthy` (HTTP 503 on the latter). Replaces three divergent local healthcheck implementations in `library-metadata-lookup`, `request-o-matic`, and `semantic-index`.
