@@ -2,15 +2,25 @@
 
 All notable changes to this project will be documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] - Unreleased
 
-Test-only changes against the Phase C conformance fixture; no public API additions and no version bump beyond what 0.3.0 ships.
+Phase E of the [wxyc-fastapi plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md): the `db.lazy_pg` module — a lazy, reconnecting sync `psycopg` connection wrapper lifted verbatim from semantic-index's `utils.py`. The 1.0.0 cut signals API stability — the package surface (`observability/*`, `healthcheck/*`, `http/singleton`, `db/lazy_pg`) is now considered settled. Closes [WXYC/wxyc-fastapi#6](https://github.com/WXYC/wxyc-fastapi/issues/6) and the [#1](https://github.com/WXYC/wxyc-fastapi/issues/1) epic on consumer migration.
 
 ### Added
-- `tests/healthcheck/test_conformance.py` — Phase C conformance test ([WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4)) asserting that the local Pydantic `ReadinessResponse` model in `wxyc_fastapi.healthcheck.readiness` and the `HealthCheckResponse` / `ReadinessResponse` schemas in [`wxyc-shared/api.yaml@v0.13.0`](https://github.com/WXYC/wxyc-shared/blob/v0.13.0/api.yaml) agree on the `status` enum (`healthy`/`degraded`/`unhealthy`), the per-service value enum (`ok`/`unavailable`/`timeout`), the required-fields surface, and the `additionalProperties: true` openness. Three round-trip cases (healthy/degraded/unhealthy) validate the same payload through both schemas via `jsonschema` and the Pydantic model so the test fails if either side accepts what the other rejects. A breaking change to either side fails CI here.
+- `wxyc_fastapi.db.lazy_pg.LazyPgConnection(dsn, label)` — defers `psycopg.connect` until first `get()`, transparently reconnects when the underlying connection is closed (server-side disconnect, idle timeout, pool eviction), returns `None` when `dsn is None` or when `psycopg.connect` raises. Logs at WARNING with `exc_info` on connect failure so operators see the underlying `OperationalError` without the pipeline aborting.
+- `tests/db/test_lazy_pg.py` — 8-test suite covering: no-op when DSN is `None`; lazy first-connect with `autocommit=True` kwarg pass-through; identity caching across subsequent `get()` calls; reconnect after the cached connection's `closed` flag flips; graceful-degradation `None` return on `psycopg.connect` failure with retry on the next call; multi-instance independence.
+- `[psycopg]` optional extra (`psycopg>=3.1`). Only consumers wiring `LazyPgConnection` against a real DSN need it installed; semantic-index does. The pre-existing `[asyncpg]` extra is left in place for forward-looking async pool consumers (none today).
+- `tests/healthcheck/test_conformance.py` (carried in from the post-0.3.0 follow-up) — Phase C conformance test ([WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4)) asserting that the local Pydantic `ReadinessResponse` model in `wxyc_fastapi.healthcheck.readiness` and the `HealthCheckResponse` / `ReadinessResponse` schemas in [`wxyc-shared/api.yaml@v0.13.0`](https://github.com/WXYC/wxyc-shared/blob/v0.13.0/api.yaml) agree on the `status` enum (`healthy`/`degraded`/`unhealthy`), the per-service value enum (`ok`/`unavailable`/`timeout`), the required-fields surface, and the `additionalProperties: true` openness. Three round-trip cases (healthy/degraded/unhealthy) validate the same payload through both schemas via `jsonschema` and the Pydantic model so the test fails if either side accepts what the other rejects. A breaking change to either side fails CI here.
 - `tests/healthcheck/fixtures/api-yaml-schemas.json` — vendored snapshot of the two component schemas at the pinned wxyc-shared tag. Refresh with `python scripts/sync-api-yaml-schemas.py --ref vX.Y.Z`.
 - `scripts/sync-api-yaml-schemas.py` — CLI to refresh the fixture from a configurable wxyc-shared git ref.
-- `[dev]` extra picks up `jsonschema>=4.21` and `pyyaml>=6.0` for the conformance test and the sync script.
+- `[dev]` extra picks up `jsonschema>=4.21`, `pyyaml>=6.0`, and `psycopg>=3.1` so the full local test suite runs without manual extras.
+
+### Consumer impact
+- **No change for v0.x consumers** — re-pin from `>=0.3.0,<0.4.0` to `>=1.0.0,<2.0.0`. The 1.0.0 cut is a SemVer-stability signal, not a breaking change; the existing `observability/*`, `healthcheck/*`, and `http/singleton` surfaces are unchanged.
+- The `db.lazy_pg` module is sync (`psycopg`), not async (`asyncpg`). The wiki plan's [§2.1](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md) line "`LazyPgConnection` from semantic-index `utils.py:14-42`. Already mature; only consumer migration to do." pinned the lift-verbatim contract — the original is sync. Async services that need a pool should use `wxyc_fastapi.http.singleton.async_singleton` to wrap `asyncpg.create_pool` instead; that path has the double-check-lock the [LML#241](https://github.com/WXYC/library-metadata-lookup/issues/241) FD-leak race requires. The `[asyncpg]` extra remains declared for that future case.
+- semantic-index migration (the only consumer today): swap `from semantic_index.utils import LazyPgConnection` for `from wxyc_fastapi.db import LazyPgConnection` in `discogs_client`, `musicbrainz_client`, `wikidata_client`, `acousticbrainz_client`, and `graph_metrics`. No behavior change.
+
+[1.0.0]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v1.0.0
 
 ## [0.3.0] - Unreleased
 

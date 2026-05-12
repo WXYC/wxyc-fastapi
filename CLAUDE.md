@@ -30,7 +30,9 @@ src/wxyc_fastapi/
 ├── http/                  # v0.3.0 — Phase D
 │   ├── __init__.py        # re-exports
 │   └── singleton.py       # async_singleton(factory) -> (getter, closer)
-└── db/                    # v1.0.0 — Phase E (pending)
+└── db/                    # v1.0.0 — Phase E
+    ├── __init__.py        # re-exports
+    └── lazy_pg.py         # LazyPgConnection (sync psycopg, lifted from semantic-index/utils.py)
 tests/
 ├── conftest.py            # cache-stats ContextVar isolation fixture
 ├── observability/
@@ -44,8 +46,10 @@ tests/
 │   ├── test_conformance.py         # Phase C: api.yaml ↔ ReadinessResponse parity
 │   ├── test_liveness.py
 │   └── test_readiness.py
-└── http/
-    └── test_singleton.py           # Phase D: LML#241 reproducer + closer + retry semantics
+├── http/
+│   └── test_singleton.py           # Phase D: LML#241 reproducer + closer + retry semantics
+└── db/
+    └── test_lazy_pg.py             # Phase E: lazy connect + reconnect + connect-failure retry
 scripts/
 └── sync-api-yaml-schemas.py        # refresh the conformance fixture from a wxyc-shared tag
 ```
@@ -104,14 +108,14 @@ The `posthog` SDK is imported inside `get_posthog_client` on first successful ca
 | 0.1.0 | A | observability/ (cache_stats + sentry + posthog + telemetry; ships after PR 3) |
 | 0.2.0 | B | healthcheck/ |
 | 0.3.0 | D | http/singleton (async-singleton + lock helper) |
-| 1.0.0 | E | db/lazy_pg with double-check-lock pattern |
+| 1.0.0 | E | db/lazy_pg (sync psycopg, lifted verbatim from semantic-index `utils.py:14-42`) |
 
 The package follows SemVer; consumers pin a minor range (`wxyc-fastapi>=0.1,<0.2`) until 1.0.
 
 ## Dependencies
 
 - Required: `fastapi>=0.110`, `httpx>=0.25`, `sentry-sdk[fastapi]>=2.0`
-- Extras: `[posthog]` (used by PR 2's posthog module), `[asyncpg]` (Phase E), `[dev]`
+- Extras: `[posthog]` (used by PR 2's posthog module), `[psycopg]` (Phase E `db.lazy_pg`), `[asyncpg]` (forward-looking, no consumer today), `[dev]`
 
 `fastapi` and `sentry-sdk` are required deps even at PR 1 because the eventual v0.1.0 surface needs them; pyproject.toml is forward-looking so subsequent PRs don't need to bump the dep set.
 
@@ -121,13 +125,13 @@ The package follows SemVer; consumers pin a minor range (`wxyc-fastapi>=0.1,<0.2
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -e '.[dev,posthog]'
+.venv/bin/pip install -e '.[dev,posthog,psycopg]'
 ```
 
 ### Test + lint
 
 ```bash
-.venv/bin/pytest                       # 114 tests across observability + healthcheck + http (incl. Phase C conformance)
+.venv/bin/pytest                       # 122 tests across observability + healthcheck + http + db (incl. Phase C conformance)
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
 ```
@@ -189,6 +193,14 @@ The closer dispatches teardown across the three shapes seen in WXYC's stack: `ac
 Factory exception leaves the singleton unset and releases the lock (via `async with`), so the next `await getter()` retries — a single transient init failure must not permanently wedge the service into a half-built state.
 
 The headline regression test is `tests/http/test_singleton.py::TestConcurrentFirstCallers::test_factory_invoked_once_under_concurrency`: 50 concurrent first-callers must see one factory invocation. Removing `async with lock:` from `singleton.py` fails it (50 invocations instead of 1).
+
+## Db lazy_pg
+
+`wxyc_fastapi.db.LazyPgConnection(dsn, label)` is a sync, lazy, reconnecting `psycopg` connection wrapper lifted verbatim from semantic-index's `utils.py:14-42`. It defers `psycopg.connect` until the first `get()`, returns the cached connection on subsequent calls, and transparently re-opens it when `connection.closed` flips to `True` (server-side disconnect, idle timeout, pool eviction). When the DSN is `None` or `psycopg.connect` raises, `get()` returns `None` — the contract is graceful degradation, not exception propagation. Pipeline modules branch on the `None` return to skip PG-backed code paths cleanly.
+
+The wrapper is **sync**, not async. semantic-index's pipeline is single-threaded, so there's no concurrent-first-caller race to defend against here — the double-check-lock that `wxyc_fastapi.http.singleton.async_singleton` ships is for the async `httpx.AsyncClient` / `asyncpg.Pool` case ([LML#241](https://github.com/WXYC/library-metadata-lookup/issues/241)). Async services that need a PG pool should wrap `asyncpg.create_pool` with `async_singleton` instead of reaching for `LazyPgConnection`. The `[asyncpg]` extra remains declared in pyproject.toml for that future case; the new `[psycopg]` extra (`psycopg>=3.1`) covers `LazyPgConnection`'s actual driver dependency.
+
+The semantic-index migration (the only consumer today) is a five-file import swap: `discogs_client.py`, `musicbrainz_client.py`, `wikidata_client.py`, `acousticbrainz_client.py`, and `graph_metrics.py` swap `from semantic_index.utils import LazyPgConnection` for `from wxyc_fastapi.db import LazyPgConnection`. No behavior change.
 
 ## Migration playbook (for consumer-side tickets A2/A3/A4)
 

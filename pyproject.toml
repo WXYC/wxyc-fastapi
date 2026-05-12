@@ -1,7 +1,7 @@
 [project]
 name = "wxyc-fastapi"
-version = "0.3.0"
-description = "Shared FastAPI service primitives for WXYC: Sentry init, request telemetry, cache-stats recorder, PostHog wrapper"
+version = "1.0.0"
+description = "Shared FastAPI service primitives for WXYC: Sentry init, request telemetry, cache-stats recorder, PostHog wrapper, healthcheck routers, async-singleton, lazy PG"
 requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
@@ -31,12 +31,16 @@ posthog = [
 asyncpg = [
     "asyncpg>=0.29",
 ]
+psycopg = [
+    "psycopg>=3.1",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
     "ruff>=0.4",
     "posthog>=3.0",
+    "psycopg>=3.1",
     # Used by the Phase C conformance test (`tests/healthcheck/test_conformance.py`)
     # and the `scripts/sync-api-yaml-schemas.py` fixture refresher. See CLAUDE.md
     # "Conformance test" section.
