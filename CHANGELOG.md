@@ -4,13 +4,28 @@ All notable changes to this project will be documented in this file. Format foll
 
 ## [Unreleased]
 
-Test-only changes; no public API additions and no version bump. v0.2.0 ships unchanged.
+Test-only changes against the Phase C conformance fixture; no public API additions and no version bump beyond what 0.3.0 ships.
 
 ### Added
 - `tests/healthcheck/test_conformance.py` — Phase C conformance test ([WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4)) asserting that the local Pydantic `ReadinessResponse` model in `wxyc_fastapi.healthcheck.readiness` and the `HealthCheckResponse` / `ReadinessResponse` schemas in [`wxyc-shared/api.yaml@v0.13.0`](https://github.com/WXYC/wxyc-shared/blob/v0.13.0/api.yaml) agree on the `status` enum (`healthy`/`degraded`/`unhealthy`), the per-service value enum (`ok`/`unavailable`/`timeout`), the required-fields surface, and the `additionalProperties: true` openness. Three round-trip cases (healthy/degraded/unhealthy) validate the same payload through both schemas via `jsonschema` and the Pydantic model so the test fails if either side accepts what the other rejects. A breaking change to either side fails CI here.
 - `tests/healthcheck/fixtures/api-yaml-schemas.json` — vendored snapshot of the two component schemas at the pinned wxyc-shared tag. Refresh with `python scripts/sync-api-yaml-schemas.py --ref vX.Y.Z`.
 - `scripts/sync-api-yaml-schemas.py` — CLI to refresh the fixture from a configurable wxyc-shared git ref.
 - `[dev]` extra picks up `jsonschema>=4.21` and `pyyaml>=6.0` for the conformance test and the sync script.
+
+## [0.3.0] - Unreleased
+
+Phase D part 1 of the [wxyc-fastapi plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md): the `http.singleton` module — a generic double-check-lock async-singleton helper that prevents the file-descriptor leak race documented in [LML#241](https://github.com/WXYC/library-metadata-lookup/issues/241) (fix in [LML#242](https://github.com/WXYC/library-metadata-lookup/pull/242)). Three consumer migrations ride along ([LML#283](https://github.com/WXYC/library-metadata-lookup/issues/283), [rom#116](https://github.com/WXYC/request-o-matic/issues/116), [LML#284](https://github.com/WXYC/library-metadata-lookup/issues/284)) so the next async-singleton can't be written without the lock.
+
+### Added
+- `wxyc_fastapi.http.singleton.async_singleton(factory)` — returns a `(getter, closer)` pair backing a lazy async singleton. The getter implements double-check-lock so concurrent first-callers see exactly one `factory()` invocation; the closer dispatches teardown across the three shapes seen in WXYC's stack: `aclose()` (httpx `AsyncClient`), `close()` returning a coroutine (`asyncpg.Pool`), and `close()` returning `None` (sync, e.g. `posthog.Posthog`).
+- `tests/http/test_singleton.py` — 11-test suite. The headline `test_factory_invoked_once_under_concurrency` is the LML#241 reproducer: 50 concurrent first-callers must see one factory call. Removing the lock from `async_singleton` fails it.
+
+### Consumer impact
+- `Check.required` parallel: the factory is run *only* under the lock after the inner re-check, so it's safe to do expensive work (open pools, perform handshakes) without worrying about duplicate invocation.
+- Factory exception leaves the singleton unset and releases the lock; the next `await getter()` will retry. This is intentional — a single transient init failure must not permanently wedge the service into a half-built state.
+- The closer captures-then-clears the cached instance before invoking teardown so a concurrent getter sees `None` immediately and rebuilds via the factory rather than racing against a half-torn-down resource.
+
+[0.3.0]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v0.3.0
 
 ## [0.2.0] - Unreleased
 
