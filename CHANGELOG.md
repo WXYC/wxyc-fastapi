@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - Unreleased
+
+Phase B of the [wxyc-fastapi plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md): the `healthcheck` package — a single `liveness_router` plus a parameterized `readiness_router(checks, *, timeout=...)` that runs probes concurrently with per-probe timeouts and aggregates `healthy`/`degraded`/`unhealthy` (HTTP 503 on the latter). Replaces three divergent local healthcheck implementations in `library-metadata-lookup`, `request-o-matic`, and `semantic-index`.
+
+### Added
+- `wxyc_fastapi.healthcheck.liveness` — `liveness_router` mounted at `GET /health`. Returns `{"status": "healthy"}` without running any probes; intended for orchestrator liveness checks (Railway, Docker `HEALTHCHECK`).
+- `wxyc_fastapi.healthcheck.readiness` — `readiness_router(checks, *, timeout=3.0)` factory mounted at `GET /health/ready`. Each `Check(name, probe, required=True)` is run concurrently via `asyncio.gather` with a per-probe `asyncio.wait_for(timeout)`. Probes return `"ok"` on success; raising or returning any other string is treated as `"unavailable"`; timeouts are reported as `"timeout"`. Aggregation: any required failure → `unhealthy` (HTTP 503); any optional failure → `degraded` (HTTP 200); otherwise `healthy`.
+- The response shape conforms to the `HealthCheckResponse` / `ReadinessResponse` contract added to `wxyc-shared/api.yaml` in Phase C; a conformance test is filed separately ([WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4)).
+
+### Consumer impact
+- `Check.required` defaults to `True` — the safe default, since forgetting to mark a probe required would silently downgrade an unhealthy service to `degraded`. Migrating consumers must explicitly set `required=False` for non-critical dependencies (e.g. an upstream metadata service whose unavailability does not block answering requests).
+- The 3.0-second default per-probe timeout matches LML's prior behaviour. rom and semantic-index were unbounded; their migration tickets should review their probes for ones that may legitimately exceed 3s and either tune `timeout=` or shorten the probe.
+
+[0.2.0]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v0.2.0
+
 ## [0.1.0] - Unreleased
 
 Phase A of the [wxyc-fastapi plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md): the observability modules extracted from the FastAPI sibling services (`library-metadata-lookup`, `request-o-matic`, `semantic-index`). Phase A shipped across three sequential PRs that all roll up into v0.1.0.

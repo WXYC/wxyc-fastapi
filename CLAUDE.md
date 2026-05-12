@@ -23,16 +23,22 @@ src/wxyc_fastapi/
 │   ├── sentry.py          # PR 2: init_sentry, add_breadcrumb, capture_exception
 │   ├── posthog.py         # PR 2: get_posthog_client (warn-once), flush, shutdown
 │   └── telemetry.py       # PR 3: RequestTelemetry, StepResult, track_step, send_to_posthog
-├── healthcheck/           # v0.2.0 — Phase B (pending)
+├── healthcheck/           # v0.2.0 — Phase B
+│   ├── __init__.py        # re-exports
+│   ├── liveness.py        # liveness_router (GET /health)
+│   └── readiness.py       # readiness_router(checks, *, timeout=...) factory + Check dataclass
 ├── http/                  # v0.3.0 — Phase D (pending)
 └── db/                    # v1.0.0 — Phase E (pending)
 tests/
 ├── conftest.py            # cache-stats ContextVar isolation fixture
-└── observability/
-    ├── test_cache_stats.py  # PR 1
-    ├── test_sentry.py       # PR 2
-    ├── test_posthog.py      # PR 2
-    └── test_telemetry.py    # PR 3
+├── observability/
+│   ├── test_cache_stats.py  # PR 1
+│   ├── test_sentry.py       # PR 2
+│   ├── test_posthog.py      # PR 2
+│   └── test_telemetry.py    # PR 3
+└── healthcheck/
+    ├── test_liveness.py
+    └── test_readiness.py
 ```
 
 ## Public API surface
@@ -112,7 +118,7 @@ python3.12 -m venv .venv
 ### Test + lint
 
 ```bash
-.venv/bin/pytest                       # 58 tests across all four modules
+.venv/bin/pytest                       # 72 tests across observability + healthcheck
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
 ```
@@ -136,6 +142,14 @@ Tag-pushed: `git tag v0.1.0 && git push origin v0.1.0` triggers `.github/workflo
 The PyPI Trusted Publisher relationship must be configured once in the PyPI UI before the first tag push (project name `wxyc-fastapi`, owner `WXYC`, repo `wxyc-fastapi`, workflow `publish.yml`, environment `pypi`).
 
 CHANGELOG.md must be updated for every PR. The "Consumer impact" subsection is non-optional when the change affects a consumer's observable behavior (e.g., the `HttpxIntegration` default-on flip in PR 2's sentry module).
+
+## Healthcheck
+
+`liveness_router` exposes `GET /health` and runs no probes — it is a process-up signal for orchestrators (Railway, Docker `HEALTHCHECK`, ECS task health). `readiness_router(checks, *, timeout=3.0)` is a *factory* that returns a fresh `APIRouter` exposing `GET /health/ready`; calling it again returns an independent router.
+
+Each `Check(name, probe, required=True)` is an async probe. Probes return `"ok"` on success. Raising or returning any other string is treated as `"unavailable"`; exceeding `timeout` is reported as `"timeout"`. Aggregation: any required failure → `unhealthy` (HTTP 503); any optional failure → `degraded` (HTTP 200); otherwise `healthy`. `Check.required` defaults to `True` because forgetting to mark a probe required would silently downgrade an unhealthy service to `degraded`.
+
+The response shape conforms to `HealthCheckResponse` / `ReadinessResponse` in `wxyc-shared/api.yaml` (Phase C). A separate conformance test ([WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4)) is filed to assert this against the regenerated TS types after the schemas land.
 
 ## Migration playbook (for consumer-side tickets A2/A3/A4)
 
