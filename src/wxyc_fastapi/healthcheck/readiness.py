@@ -20,17 +20,39 @@ either by raising or by returning a non-``"ok"`` string.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 ProbeOutcome = Literal["ok", "unavailable", "timeout"]
 ReadinessStatus = Literal["healthy", "degraded", "unhealthy"]
 
 DEFAULT_TIMEOUT_SECONDS = 3.0
+
+
+class ReadinessResponse(BaseModel):
+    """Response model for ``GET /health/ready``.
+
+    Mirrors the ``ReadinessResponse`` schema in
+    [`wxyc-shared/api.yaml`](https://github.com/WXYC/wxyc-shared/blob/main/api.yaml).
+    Conformance between the two is asserted in [WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4).
+
+    The local Pydantic model exists so FastAPI surfaces the response shape in
+    OpenAPI docs at ``/docs`` and so consumers that auto-generate clients (e.g.
+    semantic-index) see typed readiness data.
+    """
+
+    status: ReadinessStatus
+    services: dict[str, ProbeOutcome]
+
+    model_config = {"extra": "allow"}
 
 
 @dataclass(frozen=True)
@@ -57,10 +79,19 @@ async def _run_probe(check: Check, timeout: float) -> ProbeOutcome:
     try:
         result = await asyncio.wait_for(check.probe(), timeout=timeout)
     except TimeoutError:
+        logger.warning("readiness probe %r timed out after %.3fs", check.name, timeout)
         return "timeout"
     except Exception:
+        logger.exception("readiness probe %r raised", check.name)
         return "unavailable"
-    return "ok" if result == "ok" else "unavailable"
+    if result != "ok":
+        logger.warning(
+            "readiness probe %r returned non-ok value %r; treated as unavailable",
+            check.name,
+            result,
+        )
+        return "unavailable"
+    return "ok"
 
 
 def readiness_router(checks: list[Check], *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> APIRouter:
@@ -77,7 +108,7 @@ def readiness_router(checks: list[Check], *, timeout: float = DEFAULT_TIMEOUT_SE
     """
     router = APIRouter()
 
-    @router.get("/health/ready")
+    @router.get("/health/ready", response_model=ReadinessResponse)
     async def readiness() -> JSONResponse:
         outcomes = await asyncio.gather(*(_run_probe(c, timeout) for c in checks))
         services: dict[str, ProbeOutcome] = {
@@ -86,6 +117,9 @@ def readiness_router(checks: list[Check], *, timeout: float = DEFAULT_TIMEOUT_SE
 
         status = _aggregate_status(checks, outcomes)
         http_status = 503 if status == "unhealthy" else 200
+        # JSONResponse (not the Pydantic model directly) so we can stamp HTTP
+        # 503 when status == "unhealthy"; FastAPI's default response wrapping
+        # would give us 200.
         return JSONResponse(
             status_code=http_status,
             content={"status": status, "services": services},
