@@ -5,6 +5,7 @@ from wxyc_fastapi.healthcheck.readiness import (
     DEFAULT_TIMEOUT_SECONDS,
     Check,
     ProbeOutcome,
+    ReadinessResponse,
     ReadinessStatus,
     readiness_router,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "Check",
     "ProbeOutcome",
+    "ReadinessResponse",
     "ReadinessStatus",
     "liveness_router",
     "readiness_router",
