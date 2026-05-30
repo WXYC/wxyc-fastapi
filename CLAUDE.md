@@ -12,112 +12,19 @@ Phase A (issue [#2](https://github.com/WXYC/wxyc-fastapi/issues/2)) shipped acro
 2. **PR 2**: `sentry` + `posthog` modules
 3. **PR 3 (this branch)**: `telemetry` module — completes the v0.1.0 surface, tag cut after merge.
 
-## Layout
+## Topic guides
 
-```
-src/wxyc_fastapi/
-├── __init__.py            # __version__
-├── observability/         # v0.1.0 — Phase A
-│   ├── __init__.py        # re-exports (grows as PRs land)
-│   ├── cache_stats.py     # PR 1: init_cache_stats, CacheStatsRecorder, timed_pg, timed_api
-│   ├── sentry.py          # PR 2: init_sentry, add_breadcrumb, capture_exception
-│   ├── posthog.py         # PR 2: get_posthog_client (warn-once), flush, shutdown
-│   └── telemetry.py       # PR 3: RequestTelemetry, StepResult, track_step, send_to_posthog
-├── healthcheck/           # v0.2.0 — Phase B
-│   ├── __init__.py        # re-exports
-│   ├── liveness.py        # liveness_router (GET /health)
-│   └── readiness.py       # readiness_router(checks, *, timeout=...) factory + Check dataclass
-├── http/                  # v0.3.0 — Phase D
-│   ├── __init__.py        # re-exports
-│   └── singleton.py       # async_singleton(factory) -> (getter, closer)
-└── db/                    # v1.0.0 — Phase E
-    ├── __init__.py        # re-exports
-    └── lazy_pg.py         # LazyPgConnection (sync psycopg, lifted from semantic-index/utils.py)
-tests/
-├── conftest.py            # cache-stats ContextVar isolation fixture
-├── observability/
-│   ├── test_cache_stats.py  # PR 1
-│   ├── test_sentry.py       # PR 2
-│   ├── test_posthog.py      # PR 2
-│   └── test_telemetry.py    # PR 3
-├── healthcheck/
-│   ├── fixtures/
-│   │   └── api-yaml-schemas.json   # Phase C: vendored wxyc-shared schemas
-│   ├── test_conformance.py         # Phase C: api.yaml ↔ ReadinessResponse parity
-│   ├── test_liveness.py
-│   └── test_readiness.py
-├── http/
-│   └── test_singleton.py           # Phase D: LML#241 reproducer + closer + retry semantics
-└── db/
-    └── test_lazy_pg.py             # Phase E: lazy connect + reconnect + connect-failure retry
-scripts/
-└── sync-api-yaml-schemas.py        # refresh the conformance fixture from a wxyc-shared tag
-```
+CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in `docs/`:
 
-## Public API surface
+- **[`docs/architecture.md`](docs/architecture.md)** — Package layout, public API surface (`wxyc_fastapi.observability` import sites), per-consumer parameterization table (LML / rom / semantic-index), versioning ladder (0.1 → 1.0 across phases A/B/D/E), dependency policy
+- **[`docs/observability.md`](docs/observability.md)** — Cache stats ContextVar contract + `extra_keys` shape-guarantee semantics, PostHog wrapper (lazy import, warn-once on missing key), `RequestTelemetry` step + API-call tracking, `event_prefix` namespacing
+- **[`docs/healthcheck.md`](docs/healthcheck.md)** — `liveness_router` / `readiness_router(checks, *, timeout=...)` factory, `Check` semantics + aggregation rules, `wxyc-shared/api.yaml` conformance test (Phase C), fixture refresh recipe
+- **[`docs/http-singleton.md`](docs/http-singleton.md)** — `async_singleton(factory)` double-check-lock rationale (LML#241 FD-leak race), closer dispatch across `aclose()` / coroutine-`close()` / sync-`close()`, factory-exception retry semantics
+- **[`docs/db-lazy-pg.md`](docs/db-lazy-pg.md)** — `LazyPgConnection` sync-psycopg wrapper (lifted from semantic-index), graceful-degradation `None` return contract, why this is sync-only and async services should use `async_singleton(asyncpg.create_pool)` instead
+- **[`docs/release.md`](docs/release.md)** — Tag-pushed PyPI Trusted Publishing flow, CHANGELOG "Consumer impact" rule
+- **[`docs/migration-playbook.md`](docs/migration-playbook.md)** — Step-by-step recipe for consumer-side tickets A2/A3/A4 (LML, rom, semantic-index): pyproject pin, swap `core/sentry.py` + `core/telemetry.py`, cache-stats free-function → recorder-method migration
 
-PR 3 completes the v0.1.0 surface. Consumers should import from `wxyc_fastapi.observability`, not the submodules:
-
-```python
-from wxyc_fastapi.observability import (
-    init_sentry, add_breadcrumb, capture_exception,
-    RequestTelemetry, StepResult,
-    init_cache_stats, get_cache_stats_recorder, get_cache_stats, CacheStatsRecorder,
-    timed_pg, timed_api,
-    get_posthog_client, flush_posthog, shutdown_posthog,
-)
-```
-
-## Per-consumer parameterization
-
-The shared modules are parameterized so each consumer can keep its existing taxonomy. When migrating a consumer, the per-consumer values are:
-
-| Parameter | LML | rom | semantic-index |
-|---|---|---|---|
-| `init_sentry(service_name=...)` | `"library-metadata-lookup"` | `"request-o-matic"` | `"semantic-index"` |
-| `init_cache_stats(extra_keys=...)` | `None` | `["memory_misses"]` | `None` |
-| `RequestTelemetry.api_call_keys` | `["discogs"]` | `["groq", "discogs", "slack"]` | `[]` |
-| `RequestTelemetry.distinct_id` | `"library-metadata-lookup-service"` | `"request-o-matic-service"` | `"semantic-index-service"` |
-| `RequestTelemetry.event_prefix` | `"lookup"` | `"request"` | `"explore"` |
-| `get_posthog_client(event_prefix=...)` | `"lookup"` | `"request"` | `"explore"` (no-op; semantic-index doesn't install the `[posthog]` extra) |
-
-`HttpxIntegration` is default-on in `init_sentry` — see CHANGELOG's "Consumer impact" line. Pass `integrations=[FastApiIntegration()]` to opt out.
-
-## Cache stats: behavior recap
-
-`init_cache_stats` seeds the per-request stats dict with six base keys (`memory_hits`, `pg_hits`, `pg_misses`, `api_calls`, `pg_time_ms`, `api_time_ms`); `extra_keys=[...]` adds consumer-specific metrics. `extra_keys` is a *shape guarantee* — it makes sure the named keys appear in `get_cache_stats()` with value `0` even when never recorded, so PostHog event shapes stay stable across requests. It is not a permission system: `recorder.record(key, value)` and the named helpers (e.g. `record_memory_cache_miss`) will create undeclared keys on first call.
-
-`CacheStatsRecorder` exposes well-named helpers (`record_memory_cache_hit`, `record_pg_cache_miss`, `record_pg_time(ms)`, ...) plus a generic `record(key, value)` for ad-hoc metrics. All recorder methods are no-ops when `init_cache_stats()` has not been called for the current async context, so library code can call them unconditionally.
-
-## PostHog wrapper
-
-`get_posthog_client(event_prefix)` returns a lazy singleton. The `event_prefix` argument is purely diagnostic — it surfaces in the warn-once log line that fires when `POSTHOG_API_KEY` is missing, so co-located services each get one warning instead of one per call. The returned client is shared across callers; events are **not** auto-prefixed.
-
-The `posthog` SDK is imported inside `get_posthog_client` on first successful call (when an API key is set). Consumers that never call it do not need the `[posthog]` extra installed — semantic-index relies on this.
-
-## Telemetry
-
-`RequestTelemetry(api_call_keys, distinct_id, event_prefix)` tracks step timings + per-service API-call counts for a single request. The `event_prefix` namespaces the emitted PostHog events: `lookup` produces `lookup_<step>` per-step events and a `lookup_completed` summary; `request` produces `request_<step>` and `request_completed`.
-
-`track_step` is a context manager that records duration even when the body raises (it re-raises after stamping `error_type`). `send_to_posthog` reads cache stats from `cache_stats.get_cache_stats()` so telemetry and cache-recording stay decoupled — consumers initialize cache stats and telemetry independently per request.
-
-## Versioning
-
-| Version | Phase | Adds |
-|---|---|---|
-| 0.1.0 | A | observability/ (cache_stats + sentry + posthog + telemetry; ships after PR 3) |
-| 0.2.0 | B | healthcheck/ |
-| 0.3.0 | D | http/singleton (async-singleton + lock helper) |
-| 1.0.0 | E | db/lazy_pg (sync psycopg, lifted verbatim from semantic-index `utils.py:14-42`) |
-
-The package follows SemVer; consumers pin a minor range (`wxyc-fastapi>=0.1,<0.2`) until 1.0.
-
-## Dependencies
-
-- Required: `fastapi>=0.110`, `httpx>=0.25`, `sentry-sdk[fastapi]>=2.0`
-- Extras: `[posthog]` (used by PR 2's posthog module), `[psycopg]` (Phase E `db.lazy_pg`), `[asyncpg]` (forward-looking, no consumer today), `[dev]`
-
-`fastapi` and `sentry-sdk` are required deps even at PR 1 because the eventual v0.1.0 surface needs them; pyproject.toml is forward-looking so subsequent PRs don't need to bump the dep set.
+Read the relevant topic doc before doing work in that area.
 
 ## Development
 
@@ -147,70 +54,6 @@ Per the WXYC global convention, every change in this repo follows red → green 
 3. Refactor.
 
 The cache-stats ContextVar isolation is a recurring footgun — pytest reuses the same execution context across tests, so a synchronous `_cache_stats_var.set(...)` in test N persists into test N+1's `asyncio.run()` block. The autouse fixture in `tests/conftest.py` replaces the module-level `_cache_stats_var` with a fresh `ContextVar` per test. New tests get this isolation for free; do not call `_cache_stats_var.set(...)` directly from production code outside of `init_cache_stats()`.
-
-## Release
-
-Tag-pushed: `git tag v0.1.0 && git push origin v0.1.0` triggers `.github/workflows/publish.yml` which builds + uploads via PyPI Trusted Publishing (no token in repo). The tag is cut after PR 3 merges, not PR 1 or PR 2.
-
-The PyPI Trusted Publisher relationship must be configured once in the PyPI UI before the first tag push (project name `wxyc-fastapi`, owner `WXYC`, repo `wxyc-fastapi`, workflow `publish.yml`, environment `pypi`).
-
-CHANGELOG.md must be updated for every PR. The "Consumer impact" subsection is non-optional when the change affects a consumer's observable behavior (e.g., the `HttpxIntegration` default-on flip in PR 2's sentry module).
-
-## Healthcheck
-
-`liveness_router` exposes `GET /health` and runs no probes — it is a process-up signal for orchestrators (Railway, Docker `HEALTHCHECK`, ECS task health). `readiness_router(checks, *, timeout=3.0)` is a *factory* that returns a fresh `APIRouter` exposing `GET /health/ready`; calling it again returns an independent router.
-
-Each `Check(name, probe, required=True)` is an async probe. Probes return `"ok"` on success. Raising or returning any other string is treated as `"unavailable"`; exceeding `timeout` is reported as `"timeout"`. Aggregation: any required failure → `unhealthy` (HTTP 503); any optional failure → `degraded` (HTTP 200); otherwise `healthy`. `Check.required` defaults to `True` because forgetting to mark a probe required would silently downgrade an unhealthy service to `degraded`.
-
-The response shape conforms to `HealthCheckResponse` / `ReadinessResponse` in `wxyc-shared/api.yaml` (Phase C). The conformance is asserted by `tests/healthcheck/test_conformance.py` — see "Conformance test" below.
-
-## Conformance test
-
-`tests/healthcheck/test_conformance.py` ([WXYC/wxyc-fastapi#4](https://github.com/WXYC/wxyc-fastapi/issues/4)) is the cross-language contract pin: a breaking change to the local Pydantic `ReadinessResponse` model **or** to the `HealthCheckResponse` / `ReadinessResponse` schemas in [`wxyc-shared/api.yaml`](https://github.com/WXYC/wxyc-shared/blob/main/api.yaml) fails this test in CI.
-
-The test reads from a vendored snapshot at `tests/healthcheck/fixtures/api-yaml-schemas.json` (currently pinned to `wxyc-shared@v0.13.0`) so it runs hermetically — no network at test time. The snapshot stores the raw OpenAPI component schemas plus a `_pinned_version` marker; the test re-asserts the pin, so a stale fixture cannot drift silently.
-
-The comparison is *focused*, not whole-schema: OpenAPI 3 and Pydantic's `model_json_schema()` differ syntactically (titles, `allOf` vs flattened `properties`, `$ref` resolution) in ways that are noise, not contract. The asserted invariants are: the `status` enum members (`healthy`/`degraded`/`unhealthy`), the per-service value enum (`ok`/`unavailable`/`timeout`), the required-fields surface (`status` + `services`), and `additionalProperties: true` on the openable parent. Three round-trip cases (healthy / degraded / unhealthy) validate the same payload through both the api.yaml schema (via [`jsonschema`](https://python-jsonschema.readthedocs.io/) + [`referencing`](https://referencing.readthedocs.io/)) and the local Pydantic model so the test fails if either side accepts what the other rejects.
-
-### Refresh the fixture
-
-When `wxyc-shared` cuts a new release that touches either schema:
-
-```bash
-python scripts/sync-api-yaml-schemas.py --ref vX.Y.Z
-```
-
-This rewrites `tests/healthcheck/fixtures/api-yaml-schemas.json` from `https://raw.githubusercontent.com/WXYC/wxyc-shared/<ref>/api.yaml`. Then update `_PINNED_REF` in `test_conformance.py` to match (the test re-asserts the pin) and commit both together. If the refresh exposes a real conformance gap (the test starts failing on the new fixture), decide deliberately whether to update the local Pydantic model or push back on the wxyc-shared change — the failure mode is the test catching a contract drift, not a bug in the test.
-
-The script and the conformance test depend on `jsonschema>=4.21` and `pyyaml>=6.0` from the `[dev]` extra.
-
-## Http singleton
-
-`wxyc_fastapi.http.async_singleton(factory)` returns a `(getter, closer)` pair backing a lazy async singleton. The getter implements double-check-lock so concurrent first-callers see exactly one `factory()` invocation — without that lock, every caller passes the outer `is None` check, each constructs a fresh client/pool, and only one survives as the cached value while the others are orphaned with their connections (and FDs) still open. This is the FD-leak race documented in [LML#241](https://github.com/WXYC/library-metadata-lookup/issues/241) and fixed in [LML#242](https://github.com/WXYC/library-metadata-lookup/pull/242); extracting the pattern here means the next async singleton can't be written without the lock.
-
-The closer dispatches teardown across the three shapes seen in WXYC's stack: `aclose()` (httpx `AsyncClient`), `close()` returning a coroutine (`asyncpg.Pool`), and `close()` returning `None` (sync, e.g. `posthog.Posthog`). It captures-then-clears the cached instance before invoking teardown so a concurrent `await getter()` rebuilds via the factory rather than racing against a half-torn-down resource.
-
-Factory exception leaves the singleton unset and releases the lock (via `async with`), so the next `await getter()` retries — a single transient init failure must not permanently wedge the service into a half-built state.
-
-The headline regression test is `tests/http/test_singleton.py::TestConcurrentFirstCallers::test_factory_invoked_once_under_concurrency`: 50 concurrent first-callers must see one factory invocation. Removing `async with lock:` from `singleton.py` fails it (50 invocations instead of 1).
-
-## Db lazy_pg
-
-`wxyc_fastapi.db.LazyPgConnection(dsn, label)` is a sync, lazy, reconnecting `psycopg` connection wrapper lifted verbatim from semantic-index's `utils.py:14-42`. It defers `psycopg.connect` until the first `get()`, returns the cached connection on subsequent calls, and transparently re-opens it when `connection.closed` flips to `True` (server-side disconnect, idle timeout, pool eviction). When the DSN is `None` or `psycopg.connect` raises, `get()` returns `None` — the contract is graceful degradation, not exception propagation. Pipeline modules branch on the `None` return to skip PG-backed code paths cleanly.
-
-The wrapper is **sync**, not async. semantic-index's pipeline is single-threaded, so there's no concurrent-first-caller race to defend against here — the double-check-lock that `wxyc_fastapi.http.singleton.async_singleton` ships is for the async `httpx.AsyncClient` / `asyncpg.Pool` case ([LML#241](https://github.com/WXYC/library-metadata-lookup/issues/241)). Async services that need a PG pool should wrap `asyncpg.create_pool` with `async_singleton` instead of reaching for `LazyPgConnection`. The `[asyncpg]` extra remains declared in pyproject.toml for that future case; the new `[psycopg]` extra (`psycopg>=3.1`) covers `LazyPgConnection`'s actual driver dependency.
-
-The semantic-index migration (the only consumer today) is a five-file import swap: `discogs_client.py`, `musicbrainz_client.py`, `wikidata_client.py`, `acousticbrainz_client.py`, and `graph_metrics.py` swap `from semantic_index.utils import LazyPgConnection` for `from wxyc_fastapi.db import LazyPgConnection`. No behavior change.
-
-## Migration playbook (for consumer-side tickets A2/A3/A4)
-
-1. Add `wxyc-fastapi[posthog]>=0.1,<0.2` to `pyproject.toml`.
-2. Replace `core/sentry.py` with `from wxyc_fastapi.observability import init_sentry, add_breadcrumb, capture_exception`. The breadcrumb call sites need to pass `category=` explicitly (existing rom/LML hard-coded `"discogs"`).
-3. Replace `core/telemetry.py` `RequestTelemetry()` constructor sites with the parameterized version (see table above).
-4. Replace cache-stats `record_*` free functions with `get_cache_stats_recorder().record_*` method calls. The ContextVar location does not change (per-request stats still live in the per-context dict).
-5. Replace ad-hoc PostHog client construction with `get_posthog_client(event_prefix)`.
-6. Delete the old local `core/sentry.py` and `core/telemetry.py` files.
-7. Run the consumer's existing test suite — no behavior changes are expected except the `HttpxIntegration` default-on flip (LML only).
 
 ## Related repos
 
