@@ -91,6 +91,95 @@ class TestTrackStep:
         assert d2 >= d1
 
 
+def _dur_values(header: str) -> dict[str, float]:
+    """Parse a Server-Timing header value into ``{name: dur}`` for assertions.
+
+    Mirrors the grammar ``as_server_timing`` emits: ``name;dur=<float>`` entries
+    joined by ``", "``. Raises if any ``dur`` is not a float, so it doubles as a
+    round-trip guard for the ROM-side parser.
+    """
+    out: dict[str, float] = {}
+    for entry in header.split(", "):
+        name, _, param = entry.partition(";")
+        assert param.startswith("dur="), f"bad entry: {entry!r}"
+        out[name] = float(param[len("dur=") :])
+    return out
+
+
+class TestAsServerTiming:
+    def test_empty_steps_is_total_only(self):
+        t = make_telemetry()
+        header = t.as_server_timing()
+        # Exactly one entry, and it is the live total. No leading/trailing comma.
+        assert header.count(";dur=") == 1
+        assert header.startswith("total;dur=")
+        assert not header.startswith(", ")
+        assert not header.endswith(", ")
+        values = _dur_values(header)
+        assert set(values) == {"total"}
+        assert values["total"] >= 0
+
+    def test_steps_emitted_in_insertion_order_then_total_last(self):
+        t = make_telemetry()
+        with t.track_step("parse"):
+            pass
+        with t.track_step("library_search"):
+            pass
+        with t.track_step("metadata_enrichment"):
+            pass
+        header = t.as_server_timing()
+        names = [entry.split(";")[0] for entry in header.split(", ")]
+        assert names == ["parse", "library_search", "metadata_enrichment", "total"]
+
+    def test_extra_appended_after_steps_before_total(self):
+        t = make_telemetry()
+        with t.track_step("library_search"):
+            pass
+        with t.track_step("metadata_enrichment"):
+            pass
+        header = t.as_server_timing(extra={"discogs": 404.0})
+        names = [entry.split(";")[0] for entry in header.split(", ")]
+        assert names == ["library_search", "metadata_enrichment", "discogs", "total"]
+
+    def test_exactly_one_total_with_steps_and_extra(self):
+        t = make_telemetry()
+        with t.track_step("parse"):
+            pass
+        header = t.as_server_timing(extra={"discogs": 12.0, "lookup_service": 40.0})
+        assert header.count("total;dur=") == 1
+
+    def test_float_formatting_two_decimals_trailing_zeros_stripped(self):
+        t = make_telemetry()
+        # Set steps directly so durations are deterministic (track_step is live).
+        t.steps["metadata_enrichment"] = StepResult(duration_ms=8102.0)
+        t.steps["library_search"] = StepResult(duration_ms=18.4567)
+        header = t.as_server_timing(extra={"discogs": 404.00})
+        assert "metadata_enrichment;dur=8102" in header  # 8102.00 -> 8102
+        assert "library_search;dur=18.46" in header  # rounded to 2 decimals
+        assert "discogs;dur=404" in header  # 404.00 -> 404
+        # No 3+-decimal residue anywhere.
+        assert "18.4567" not in header
+
+    def test_every_dur_is_a_parseable_float(self):
+        t = make_telemetry()
+        t.steps["parse"] = StepResult(duration_ms=0.0)
+        with t.track_step("library_search"):
+            pass
+        values = _dur_values(t.as_server_timing(extra={"discogs": 404.0}))
+        assert values["parse"] == 0.0
+        assert values["discogs"] == 404.0
+        assert set(values) == {"parse", "library_search", "discogs", "total"}
+
+    def test_no_extra_omits_derived_entries(self):
+        t = make_telemetry()
+        with t.track_step("parse"):
+            pass
+        header = t.as_server_timing()
+        assert "discogs" not in header
+        names = [entry.split(";")[0] for entry in header.split(", ")]
+        assert names == ["parse", "total"]
+
+
 class TestSendToPosthog:
     def test_emits_per_step_and_summary_events(self):
         client = MagicMock()

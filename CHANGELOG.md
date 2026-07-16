@@ -2,7 +2,20 @@
 
 All notable changes to this project will be documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] - Unreleased
+## [1.1.0] - 2026-07-16
+
+Adds `RequestTelemetry.as_server_timing()` so a service can surface its already-captured per-stage step timings as a [`Server-Timing`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Server-Timing) response header. Motivated by a `lookup` CLI round-trip that measured 8.99 s while only the Discogs `cache_stats` (404 ms) was visible to the caller — the ~8.5 s spent in library-metadata-lookup's `metadata_enrichment` stage was captured by `track_step` but never reached the client. The header is the missing read surface; no new capture layer.
+
+### Added
+- `RequestTelemetry.as_server_timing(extra=None) -> str` — serializes each tracked step (`<name>;dur=<ms>`, insertion order), then one entry per `extra` item, then exactly one live `total` from `get_total_duration_ms()`, `", "`-joined per the `Server-Timing` grammar. `extra` carries durations measured outside `track_step` (library-metadata-lookup's derived `discogs` = `pg_time_ms + api_time_ms`; request-o-matic's forwarded LML sub-stages) and must not contain a `total` key. Durations render at two-decimal precision with trailing zeros stripped (`8102.00` → `8102`) and always as fixed-point so multi-second values stay parseable as plain floats.
+- `TestAsServerTiming` (7 tests) — grammar/ordering, `extra` merge position, single-`total` invariant, float formatting, empty-steps → total-only, per-`dur` float round-trip.
+
+### Consumer impact
+- Additive and backward-compatible (minor bump). Existing call sites are unchanged; a consumer re-pins `>=1.0.0,<2.0.0` → `>=1.1.0,<2.0.0` only when it calls the new method. First consumers: library-metadata-lookup (emit on `/lookup`) and request-o-matic (forward + merge on `/request`, print in the `lookup` CLI).
+
+[1.1.0]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v1.1.0
+
+## [1.0.0] - 2026-05-12
 
 Phase E of the [wxyc-fastapi plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md): the `db.lazy_pg` module — a lazy, reconnecting sync `psycopg` connection wrapper lifted verbatim from semantic-index's `utils.py`. The 1.0.0 cut signals API stability — the package surface (`observability/*`, `healthcheck/*`, `http/singleton`, `db/lazy_pg`) is now considered settled. Closes [WXYC/wxyc-fastapi#6](https://github.com/WXYC/wxyc-fastapi/issues/6) and the [#1](https://github.com/WXYC/wxyc-fastapi/issues/1) epic on consumer migration.
 
