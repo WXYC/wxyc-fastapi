@@ -32,6 +32,18 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CACHE_STATS: dict[str, float] = dict.fromkeys(_BASE_KEYS, 0)
 
 
+def _fmt_dur(value: float) -> str:
+    """Format a millisecond duration for a ``Server-Timing`` ``dur`` param.
+
+    Two-decimal precision with trailing zeros stripped, so integer-valued
+    durations stay clean (``8102.00`` → ``8102``, ``18.4567`` → ``18.46``). The
+    ``.2f`` step guarantees a ``.`` in the string, which stops ``rstrip("0")``
+    from eating integer-part zeros (``1000.00`` → ``1000``). Fixed-point (never
+    scientific) so multi-second durations stay parseable as plain floats.
+    """
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
 @dataclass
 class StepResult:
     """Outcome of a single tracked step."""
@@ -107,6 +119,33 @@ class RequestTelemetry:
     def get_step_timings(self) -> dict[str, float]:
         """Step durations as ``{<name>_ms: <duration>}``."""
         return {f"{name}_ms": step.duration_ms for name, step in self.steps.items()}
+
+    def as_server_timing(self, extra: dict[str, float] | None = None) -> str:
+        """Serialize tracked steps as a ``Server-Timing`` response-header value.
+
+        Emits one ``<name>;dur=<ms>`` entry per tracked step (in insertion order),
+        then one entry per ``extra`` item — used for durations derived outside
+        :meth:`track_step`, e.g. LML's ``discogs`` (``pg_time_ms + api_time_ms``)
+        or, on request-o-matic, the forwarded LML sub-stages — then exactly one
+        live ``total;dur=`` from :meth:`get_total_duration_ms`. Entries are joined
+        with ``", "`` per the `Server-Timing grammar
+        <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Server-Timing>`_.
+
+        ``total`` is sampled when this method is called, a few milliseconds before
+        :meth:`send_to_posthog` samples its own ``total_duration_ms`` — the two are
+        independent measurements, not identical. Durations are rounded to two
+        decimals with trailing zeros stripped (``8102.00`` → ``8102``).
+
+        The method always appends its own canonical ``total``; ``extra`` must not
+        contain a ``total`` key (the request-o-matic merge drops the forwarded LML
+        ``total`` before passing the remaining stages here) or the header will
+        carry two.
+        """
+        entries = [f"{name};dur={_fmt_dur(step.duration_ms)}" for name, step in self.steps.items()]
+        if extra:
+            entries.extend(f"{name};dur={_fmt_dur(value)}" for name, value in extra.items())
+        entries.append(f"total;dur={_fmt_dur(self.get_total_duration_ms())}")
+        return ", ".join(entries)
 
     def send_to_posthog(
         self,
