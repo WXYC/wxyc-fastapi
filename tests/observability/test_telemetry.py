@@ -244,6 +244,20 @@ class TestAsServerTimingDescriptions:
             ("has,comma", "hascomma"),
             ("line1\r\nline2", "line1line2"),
             ("back\\slash", "back\\\\slash"),
+            # `=` is dropped as defense-in-depth against a `dur=`-scanning parser.
+            ("key=value", "keyvalue"),
+            # Non-ASCII is dropped (printable-ASCII whitelist): accented Latin-1,
+            # CJK, and emoji would otherwise slip past a C0/DEL blacklist and
+            # (for anything > U+00FF) raise on the consumer's latin-1 encode.
+            ("café", "caf"),
+            ("cjk米end", "cjkend"),
+            ("note\U0001f3b5here", "notehere"),
+            # C1 controls (0x80-0x9f, incl. NEL 0x85) and the Unicode line
+            # separators (U+2028/U+2029) are dropped -- a blacklist stopping at
+            # C0/DEL would have let these through.
+            ("nel\x85csi\x9b", "nelcsi"),
+            ("ls ps ", "lsps"),
+            ("nul\x00del\x7f", "nuldel"),
         ],
     )
     def test_sanitize_desc_per_character_class(self, raw, sanitized):
@@ -281,6 +295,10 @@ class TestAsServerTimingDescriptions:
         assert "\r" not in header
         assert "\n" not in header
 
+        # The whole header survives the consumer's latin-1 header encode
+        # (Starlette's MutableHeaders.__setitem__) -- no UnicodeEncodeError.
+        header.encode("latin-1")
+
         # Every dur= is still a parseable float, values are preserved.
         values = _dur_values(header)
         # _fmt_dur rounds to 2 decimals, so an abs tolerance (not the default
@@ -294,6 +312,42 @@ class TestAsServerTimingDescriptions:
         # `,`, CR, LF) stripped, the literal `"` escaped so the quoted-string
         # stays well-formed.
         assert 'desc="ends with quote \\" next comma thennewline"' in header
+
+    def test_non_ascii_desc_is_dropped_and_header_stays_latin1_encodable(self):
+        """A `desc` carrying non-ASCII (accented Latin-1, CJK, emoji, the
+        U+2028/U+2029 line separators) or C1 controls must be coerced to
+        printable ASCII, so the whole header survives the consumer's
+        `.encode("latin-1")` header-set instead of 500-ing on
+        UnicodeEncodeError. Regression guard for the C0/DEL-only blacklist that
+        let every code point > U+00FF through to the encode boundary.
+        """
+        t = make_telemetry()
+        header = t.as_server_timing(
+            extra={"discogs": 404.0},
+            descriptions={"discogs": "é\U0001f3b5 sep   \x85\x9b cjk米"},
+        )
+        # The whole header round-trips through latin-1 (what Starlette does)
+        # without raising, and nothing non-ASCII survived into it.
+        header.encode("latin-1")
+        assert header.isascii()
+        # The surviving ASCII text still rides in a well-formed desc leg.
+        assert 'discogs;desc=" sep  cjk";dur=404' in header
+        values = _dur_values(header)
+        assert values["discogs"] == 404.0
+        assert set(values) == {"discogs", "total"}
+
+    def test_desc_that_sanitizes_to_empty_falls_back_to_plain_leg(self):
+        """A desc made up entirely of stripped bytes (structural delimiters,
+        control chars, non-ASCII) must not emit an empty `desc=""` -- the leg
+        falls back to the plain `name;dur=` form.
+        """
+        t = make_telemetry()
+        header = t.as_server_timing(
+            extra={"discogs": 404.0},
+            descriptions={"discogs": ";;,\r\n\U0001f3b5米"},
+        )
+        assert "desc=" not in header
+        assert "discogs;dur=404" in header
 
 
 class TestSendToPosthog:
