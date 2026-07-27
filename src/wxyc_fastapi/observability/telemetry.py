@@ -45,37 +45,49 @@ def _fmt_dur(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-# Server-Timing `desc` values are RFC 7230 quoted-string content. `,` and `;`
-# are the header's own structural delimiters (entry separator and param
-# separator, respectively); downstream parsers are not obligated to be
-# quoting-aware when splitting on them -- request-o-matic's
-# `parse_server_timing` is a real example: it splits every entry on a bare
-# `,` and every param on a bare `;` with no notion of "inside a quoted
-# string". Leaving either character in an unescaped `desc` would either split
-# one Server-Timing leg into two, or inject a bogus `;`-param. Escaping
-# wouldn't help a parser that doesn't unescape, so both are stripped outright
-# rather than escaped. CR/LF is never valid in an HTTP header value (encoding
-# one raises at the ASGI send layer) and is the classic header-injection
-# vector, so it -- along with the other C0 control characters and DEL, none
-# of which are legal `qdtext` -- is stripped for the same reason: escaping a
-# raw control byte doesn't make it safe to transmit. `"` and `\` remain legal
-# quoted-string content once escaped per RFC 7230 (`\"`, `\\`), so those are
-# escaped rather than stripped, preserving the text rather than discarding it.
-_DESC_UNSAFE_RE = re.compile(r"[,;\x00-\x1f\x7f]")
+# Server-Timing `desc` values are RFC 7230 quoted-string content, embedded in a
+# header the consumer serializes with `.encode("latin-1")` (Starlette's
+# `MutableHeaders.__setitem__`). `desc` is therefore coerced to a *whitelist*
+# of printable ASCII (0x20-0x7e) rather than a blacklist of known-bad bytes.
+# The whitelist is the only set that is simultaneously (a) safe from
+# header/response splitting and (b) guaranteed to encode without raising: a
+# blacklist that misses any code point > U+00FF (an accented letter, CJK, an
+# emoji, the U+2028/U+2029 line separators) would let it survive sanitization
+# and then raise `UnicodeEncodeError` at the latin-1 encode boundary -- a 500,
+# not a splitting bug, but still an availability hole a "safe to embed in a
+# header" helper must not open. So every code point outside printable ASCII --
+# all C0/C1 control characters, DEL, and every non-ASCII character -- is
+# dropped.
+#
+# From the surviving printable-ASCII set, the header's own structural
+# delimiters `,` (entry separator) and `;` (param separator) are dropped:
+# downstream parsers are not obligated to be quoting-aware when splitting on
+# them -- request-o-matic's `parse_server_timing` splits every entry on a bare
+# `,` and every param on a bare `;` -- so leaving either in would split one leg
+# into two or inject a bogus param, and escaping wouldn't help a parser that
+# never unescapes. `=` is dropped too, as defense-in-depth: a parser that scans
+# for `dur=` anywhere in an entry (rather than splitting-then-prefix-matching)
+# could otherwise be fooled by a `dur=` living inside the desc text. Finally
+# `"` and `\` are escaped rather than dropped, per RFC 7230 (`\"`, `\\`), since
+# they remain legal quoted-string content once escaped -- preserving the text.
+_DESC_NON_ASCII_RE = re.compile(r"[^\x20-\x7e]")
+_DESC_STRUCTURAL_RE = re.compile(r"[,;=]")
 
 
 def _sanitize_desc(desc: str) -> str:
-    """Sanitize free text for embedding as a Server-Timing ``desc="..."`` param.
+    """Coerce free text to a Server-Timing ``desc="..."`` quoted-string body.
 
-    Strips ``,``, ``;``, CR/LF, and other C0/DEL control characters (structural
-    delimiters and header-injection vectors -- see the module-level comment
-    above ``_DESC_UNSAFE_RE`` for why those are stripped rather than escaped),
-    then escapes ``\\`` and ``"`` per the RFC 7230 ``quoted-string`` grammar.
-    Backslash is escaped before quote so the backslash introduced to escape a
-    quote is not itself re-escaped.
+    Whitelist, not blacklist: keeps only printable ASCII (``0x20``-``0x7e``),
+    then drops the header's structural delimiters ``,`` ``;`` ``=`` and escapes
+    ``\\`` and ``"`` per the RFC 7230 ``quoted-string`` grammar. Backslash is
+    escaped before quote so the backslash introduced to escape a quote is not
+    itself re-escaped. See the module comment above ``_DESC_NON_ASCII_RE`` for
+    why the printable-ASCII whitelist -- and specifically its latin-1
+    encodability guarantee -- is load-bearing.
     """
-    cleaned = _DESC_UNSAFE_RE.sub("", desc)
-    return cleaned.replace("\\", "\\\\").replace('"', '\\"')
+    ascii_only = _DESC_NON_ASCII_RE.sub("", desc)
+    structural_stripped = _DESC_STRUCTURAL_RE.sub("", ascii_only)
+    return structural_stripped.replace("\\", "\\\\").replace('"', '\\"')
 
 
 @dataclass
@@ -192,14 +204,15 @@ class RequestTelemetry:
         keys in ``descriptions`` (names that are not a step, an ``extra`` key, or
         ``"total"``) are silently ignored.
 
-        Text is run through :func:`_sanitize_desc` before being embedded: ``,``,
-        ``;``, CR/LF, and other control characters are stripped (they are the
-        header's own structural delimiters, or invalid in a header value
-        outright, and a downstream parser is not obligated to be quoting-aware
-        when splitting on them), and ``"``/``\\`` are escaped per the RFC 7230
-        ``quoted-string`` grammar. If sanitizing reduces the text to nothing, the
-        leg falls back to the plain ``name;dur=<ms>`` form rather than emitting an
-        empty ``desc=""``.
+        Text is run through :func:`_sanitize_desc` before being embedded: it is
+        coerced to printable ASCII (non-ASCII code points and C0/C1/DEL control
+        characters are dropped, so the value always survives the consumer's
+        latin-1 header encode), the header's structural delimiters ``,`` ``;``
+        ``=`` are stripped (a downstream parser is not obligated to be
+        quoting-aware when splitting on them), and ``"``/``\\`` are escaped per
+        the RFC 7230 ``quoted-string`` grammar. If sanitizing reduces the text
+        to nothing, the leg falls back to the plain ``name;dur=<ms>`` form rather
+        than emitting an empty ``desc=""``.
         """
         descriptions = descriptions or {}
 
