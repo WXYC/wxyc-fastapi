@@ -14,6 +14,7 @@ stats from :mod:`wxyc_fastapi.observability.cache_stats`.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -42,6 +43,39 @@ def _fmt_dur(value: float) -> str:
     scientific) so multi-second durations stay parseable as plain floats.
     """
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+# Server-Timing `desc` values are RFC 7230 quoted-string content. `,` and `;`
+# are the header's own structural delimiters (entry separator and param
+# separator, respectively); downstream parsers are not obligated to be
+# quoting-aware when splitting on them -- request-o-matic's
+# `parse_server_timing` is a real example: it splits every entry on a bare
+# `,` and every param on a bare `;` with no notion of "inside a quoted
+# string". Leaving either character in an unescaped `desc` would either split
+# one Server-Timing leg into two, or inject a bogus `;`-param. Escaping
+# wouldn't help a parser that doesn't unescape, so both are stripped outright
+# rather than escaped. CR/LF is never valid in an HTTP header value (encoding
+# one raises at the ASGI send layer) and is the classic header-injection
+# vector, so it -- along with the other C0 control characters and DEL, none
+# of which are legal `qdtext` -- is stripped for the same reason: escaping a
+# raw control byte doesn't make it safe to transmit. `"` and `\` remain legal
+# quoted-string content once escaped per RFC 7230 (`\"`, `\\`), so those are
+# escaped rather than stripped, preserving the text rather than discarding it.
+_DESC_UNSAFE_RE = re.compile(r"[,;\x00-\x1f\x7f]")
+
+
+def _sanitize_desc(desc: str) -> str:
+    """Sanitize free text for embedding as a Server-Timing ``desc="..."`` param.
+
+    Strips ``,``, ``;``, CR/LF, and other C0/DEL control characters (structural
+    delimiters and header-injection vectors -- see the module-level comment
+    above ``_DESC_UNSAFE_RE`` for why those are stripped rather than escaped),
+    then escapes ``\\`` and ``"`` per the RFC 7230 ``quoted-string`` grammar.
+    Backslash is escaped before quote so the backslash introduced to escape a
+    quote is not itself re-escaped.
+    """
+    cleaned = _DESC_UNSAFE_RE.sub("", desc)
+    return cleaned.replace("\\", "\\\\").replace('"', '\\"')
 
 
 @dataclass
@@ -120,7 +154,11 @@ class RequestTelemetry:
         """Step durations as ``{<name>_ms: <duration>}``."""
         return {f"{name}_ms": step.duration_ms for name, step in self.steps.items()}
 
-    def as_server_timing(self, extra: dict[str, float] | None = None) -> str:
+    def as_server_timing(
+        self,
+        extra: dict[str, float] | None = None,
+        descriptions: dict[str, str] | None = None,
+    ) -> str:
         """Serialize tracked steps as a ``Server-Timing`` response-header value.
 
         Emits one ``<name>;dur=<ms>`` entry per tracked step (in insertion order),
@@ -140,11 +178,44 @@ class RequestTelemetry:
         contain a ``total`` key (the request-o-matic merge drops the forwarded LML
         ``total`` before passing the remaining stages here) or the header will
         carry two.
+
+        ``descriptions`` is an optional, strictly opt-in ``{leg_name: text}`` map
+        — a leg is any tracked-step name, ``extra`` key, or ``"total"``. A leg
+        named in ``descriptions`` renders as ``name;desc="<sanitized>";dur=<ms>``
+        instead of the plain ``name;dur=<ms>`` form. Names with no entry — the
+        default, and the entire map when ``descriptions`` is omitted — are
+        unaffected, so existing callers that only pass ``extra`` keep producing
+        byte-identical output. This is meant for legs that are derived or
+        overlapping rather than additive — e.g. LML's ``discogs`` leg double-
+        counts time already reflected in another span — so summing every ``dur``
+        in the header is not a valid way to reconstruct the total. Unrecognized
+        keys in ``descriptions`` (names that are not a step, an ``extra`` key, or
+        ``"total"``) are silently ignored.
+
+        Text is run through :func:`_sanitize_desc` before being embedded: ``,``,
+        ``;``, CR/LF, and other control characters are stripped (they are the
+        header's own structural delimiters, or invalid in a header value
+        outright, and a downstream parser is not obligated to be quoting-aware
+        when splitting on them), and ``"``/``\\`` are escaped per the RFC 7230
+        ``quoted-string`` grammar. If sanitizing reduces the text to nothing, the
+        leg falls back to the plain ``name;dur=<ms>`` form rather than emitting an
+        empty ``desc=""``.
         """
-        entries = [f"{name};dur={_fmt_dur(step.duration_ms)}" for name, step in self.steps.items()]
+        descriptions = descriptions or {}
+
+        def render(name: str, duration_ms: float) -> str:
+            dur_param = f"dur={_fmt_dur(duration_ms)}"
+            raw_desc = descriptions.get(name)
+            if raw_desc:
+                sanitized = _sanitize_desc(raw_desc)
+                if sanitized:
+                    return f'{name};desc="{sanitized}";{dur_param}'
+            return f"{name};{dur_param}"
+
+        entries = [render(name, step.duration_ms) for name, step in self.steps.items()]
         if extra:
-            entries.extend(f"{name};dur={_fmt_dur(value)}" for name, value in extra.items())
-        entries.append(f"total;dur={_fmt_dur(self.get_total_duration_ms())}")
+            entries.extend(render(name, value) for name, value in extra.items())
+        entries.append(render("total", self.get_total_duration_ms()))
         return ", ".join(entries)
 
     def send_to_posthog(

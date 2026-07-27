@@ -80,6 +80,7 @@ The shared modules are parameterized so each consumer can keep its existing taxo
 | 0.3.0 | D | http/singleton (async-singleton + lock helper) |
 | 1.0.0 | E | db/lazy_pg (sync psycopg, lifted verbatim from semantic-index `utils.py:14-42`) |
 | 1.1.0 | — | `RequestTelemetry.as_server_timing()` — serialize tracked steps to a `Server-Timing` header (additive; see [`observability.md`](observability.md#telemetry)) |
+| 1.2.0 | — | `as_server_timing(descriptions=...)` — per-leg `desc="..."` annotation for derived/overlapping legs, sanitized against header injection (additive; see [`observability.md`](observability.md#telemetry)) |
 
 The package follows SemVer. Now that 1.0 is cut, consumers pin the major range `wxyc-fastapi>=1.x,<2` (e.g. a consumer that calls a method added in 1.1.0 pins `>=1.1.0,<2.0.0`); a breaking change bumps to 2.0.0.
 

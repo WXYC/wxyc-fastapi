@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-07-27
+
+Adds per-leg `desc` support to `RequestTelemetry.as_server_timing()`. Some legs are derived or overlapping rather than additive — LML's `discogs` leg (`pg_time_ms + api_time_ms`) double-counts time already reflected in another span, so summing every `dur` in the header does not reconstruct the total. A `desc="overlaps album_lookup; not additive"` annotation makes that legible in the header itself instead of relying on out-of-band documentation.
+
+### Added
+- `RequestTelemetry.as_server_timing(extra=None, descriptions=None) -> str` — `descriptions` is a strictly opt-in `{leg_name: text}` map (any tracked-step name, `extra` key, or `"total"`); a named leg renders as `name;desc="<sanitized>";dur=<ms>` instead of the plain `name;dur=<ms>` form. Text is run through the new `_sanitize_desc` helper before embedding: `,`, `;`, CR/LF, and other C0/DEL control characters are stripped outright (they are the header's own structural delimiters, or invalid in a header value outright, and a downstream parser like request-o-matic's `parse_server_timing` is not obligated to be quoting-aware when splitting on them), while `"` and `\` are escaped per the RFC 7230 `quoted-string` grammar (`\"`, `\\`) since they remain legal quoted-string content once escaped. If sanitizing empties the text, the leg falls back to the plain `dur`-only form. Existing callers passing only `extra` (or nothing) are unaffected — output is byte-identical to pre-1.2.0.
+- `TestAsServerTimingDescriptions` (10 tests, `tests/observability/test_telemetry.py`) — backward-compatibility with no `descriptions`, `desc` on both an `extra` leg and a tracked step, unknown-key and no-description leg behavior, a parametrized `_sanitize_desc` table covering each unsafe character class, and a centerpiece test asserting that a `desc` containing `"`, `;`, `,`, and a CR/LF sanitizes cleanly and the resulting header still parses to exactly one `total` with all `dur` values preserved.
+
+### Consumer impact
+- Additive and backward-compatible (minor bump). Existing call sites are unchanged; a consumer re-pins `>=1.1.0,<2.0.0` → `>=1.2.0,<2.0.0` only when it calls `as_server_timing` with `descriptions=`. First consumer: library-metadata-lookup, annotating its derived `discogs` leg.
+
+[1.2.0]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v1.2.0
+
 ## [1.1.0] - 2026-07-16
 
 Adds `RequestTelemetry.as_server_timing()` so a service can surface its already-captured per-stage step timings as a [`Server-Timing`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Server-Timing) response header. Motivated by a `lookup` CLI round-trip that measured 8.99 s while only the Discogs `cache_stats` (404 ms) was visible to the caller — the ~8.5 s spent in library-metadata-lookup's `metadata_enrichment` stage was captured by `track_step` but never reached the client. The header is the missing read surface; no new capture layer.
