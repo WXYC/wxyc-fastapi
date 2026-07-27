@@ -94,15 +94,21 @@ class TestTrackStep:
 def _dur_values(header: str) -> dict[str, float]:
     """Parse a Server-Timing header value into ``{name: dur}`` for assertions.
 
-    Mirrors the grammar ``as_server_timing`` emits: ``name;dur=<float>`` entries
-    joined by ``", "``. Raises if any ``dur`` is not a float, so it doubles as a
-    round-trip guard for the ROM-side parser.
+    Mirrors the grammar ``as_server_timing`` emits: ``name;dur=<float>`` or
+    ``name;desc="...";dur=<float>`` entries joined by ``", "``. Splitting each
+    entry's params on a bare ``;`` is safe here because it is only ever fed
+    output from ``as_server_timing`` itself, whose ``_sanitize_desc`` strips
+    ``;`` from any ``desc`` text before embedding it -- so a semicolon is
+    never anything but a param separator in this fixture's input. Raises if
+    any ``dur`` is not a float, so it doubles as a round-trip guard for the
+    ROM-side parser.
     """
     out: dict[str, float] = {}
     for entry in header.split(", "):
-        name, _, param = entry.partition(";")
-        assert param.startswith("dur="), f"bad entry: {entry!r}"
-        out[name] = float(param[len("dur=") :])
+        name, _, params = entry.partition(";")
+        dur_param = next((p for p in params.split(";") if p.startswith("dur=")), None)
+        assert dur_param is not None, f"bad entry: {entry!r}"
+        out[name] = float(dur_param[len("dur=") :])
     return out
 
 
@@ -178,6 +184,116 @@ class TestAsServerTiming:
         assert "discogs" not in header
         names = [entry.split(";")[0] for entry in header.split(", ")]
         assert names == ["parse", "total"]
+
+
+class TestAsServerTimingDescriptions:
+    """Per-leg `desc` support (issue #31): `descriptions={name: text}` opts a
+    leg into `name;desc="...";dur=<ms>` — used to annotate derived/overlapping
+    legs (e.g. LML's discogs = pg_time_ms + api_time_ms) as not additive.
+    """
+
+    def test_backward_compatible_without_descriptions(self):
+        # Existing callers passing only `extra` (or nothing) are unaffected --
+        # `descriptions` is strictly opt-in.
+        t = make_telemetry()
+        with t.track_step("parse"):
+            pass
+        header = t.as_server_timing(extra={"discogs": 404.0})
+        assert "desc=" not in header
+        names = [entry.split(";")[0] for entry in header.split(", ")]
+        assert names == ["parse", "discogs", "total"]
+
+    def test_desc_emitted_on_extra_leg_before_dur(self):
+        t = make_telemetry()
+        header = t.as_server_timing(
+            extra={"discogs": 404.0},
+            descriptions={"discogs": "overlaps album_lookup, not additive"},
+        )
+        assert 'discogs;desc="overlaps album_lookup not additive";dur=404' in header
+
+    def test_desc_emitted_on_tracked_step(self):
+        t = make_telemetry()
+        with t.track_step("metadata_enrichment"):
+            pass
+        header = t.as_server_timing(descriptions={"metadata_enrichment": "cold cache"})
+        assert 'metadata_enrichment;desc="cold cache";dur=' in header
+
+    def test_unknown_description_key_is_ignored(self):
+        t = make_telemetry()
+        with t.track_step("parse"):
+            pass
+        header = t.as_server_timing(descriptions={"nonexistent_leg": "whatever"})
+        assert "nonexistent_leg" not in header
+        assert "desc=" not in header
+
+    def test_leg_without_description_has_no_desc_param(self):
+        t = make_telemetry()
+        with t.track_step("parse"):
+            pass
+        with t.track_step("search"):
+            pass
+        header = t.as_server_timing(descriptions={"search": "annotated"})
+        parse_entry = next(e for e in header.split(", ") if e.startswith("parse;"))
+        assert "desc=" not in parse_entry
+
+    @pytest.mark.parametrize(
+        ("raw", "sanitized"),
+        [
+            ('has "quotes"', 'has \\"quotes\\"'),
+            ("has;semicolon", "hassemicolon"),
+            ("has,comma", "hascomma"),
+            ("line1\r\nline2", "line1line2"),
+            ("back\\slash", "back\\\\slash"),
+        ],
+    )
+    def test_sanitize_desc_per_character_class(self, raw, sanitized):
+        from wxyc_fastapi.observability.telemetry import _sanitize_desc
+
+        assert _sanitize_desc(raw) == sanitized
+
+    def test_malicious_desc_sanitized_header_stays_single_total_and_parseable(self):
+        """Centerpiece test: a desc containing `"`, `;`, `,`, and a newline must
+        not corrupt the header -- a strict, quoting-unaware parser (like
+        request-o-matic's parse_server_timing, which splits on raw `,` / `;`)
+        must still see exactly one `total` leg and recover the correct `dur`
+        values for every leg.
+        """
+        t = make_telemetry()
+        with t.track_step("parse"):
+            pass
+        malicious = 'ends with quote " next; comma, then\r\nnewline'
+        header = t.as_server_timing(
+            extra={"discogs": 404.0},
+            descriptions={"discogs": malicious},
+        )
+
+        # Structural safety: a naive comma-split (what an unquoting-unaware
+        # strict parser does) must not produce more top-level segments than
+        # there are legs -- no comma smuggled through from the malicious desc.
+        segments = [s for s in header.split(",") if s.strip()]
+        assert len(segments) == 3  # parse, discogs(+desc), total
+
+        # Exactly one total, and it is a bare (undescribed) leg.
+        assert header.count("total;dur=") == 1
+        assert ";total;" not in f";{header}"
+
+        # No raw CR/LF ever reaches the header value.
+        assert "\r" not in header
+        assert "\n" not in header
+
+        # Every dur= is still a parseable float, values are preserved.
+        values = _dur_values(header)
+        # _fmt_dur rounds to 2 decimals, so an abs tolerance (not the default
+        # relative one) is needed for a near-zero live step duration.
+        assert values["parse"] == pytest.approx(t.steps["parse"].duration_ms, abs=0.01)
+        assert values["discogs"] == 404.0
+        assert values["total"] == pytest.approx(t.get_total_duration_ms(), abs=50)
+        assert set(values) == {"parse", "discogs", "total"}
+
+        # The desc param carries the sanitized text: structural chars (`;`,
+        # `,`, CR, LF) stripped, the literal `"` escaped so the quoted-string
+        # stays well-formed.
+        assert 'desc="ends with quote \\" next comma thennewline"' in header
 
 
 class TestSendToPosthog:
