@@ -420,3 +420,74 @@ class TestSendToPosthog:
             "pg_time_ms": 0.0,
             "api_time_ms": 0.0,
         }
+
+
+class TestEmitStepEvents:
+    """The ``emit_step_events`` toggle (default ``True``) lets a high-volume
+    consumer suppress the per-step PostHog events and emit only the summary,
+    without losing any timing data (which the summary already carries via
+    ``steps``). Motivated by LML's per-lookup fan-out: 9 tracked steps => ~10
+    PostHog events per lookup, none of the per-step events consumed by any
+    insight or alert, so a backfill campaign multiplied ingestion ~7x for no
+    observability value.
+    """
+
+    def test_emit_step_events_true_by_default(self):
+        # Default preserves the existing fan-out for consumers that build
+        # dashboards on the per-step events (request-o-matic) and for
+        # streaming/artist_resolve, which keep the default with no code change.
+        assert make_telemetry().emit_step_events is True
+
+    def test_false_suppresses_per_step_events_keeping_only_summary(self):
+        client = MagicMock()
+        init_cache_stats()
+        t = make_telemetry(
+            api_call_keys=["discogs"],
+            distinct_id="library-metadata-lookup-service",
+            event_prefix="lookup",
+            emit_step_events=False,
+        )
+        with t.track_step("library_search"):
+            pass
+        with t.track_step("album_lookup"):
+            pass
+
+        t.send_to_posthog(client)
+
+        # Two tracked steps would normally emit 3 events (2 per-step + summary);
+        # with the toggle off, only the summary fires.
+        assert client.capture.call_count == 1
+        assert client.capture.call_args.kwargs["event"] == "lookup_completed"
+
+    def test_false_still_carries_every_step_timing_in_summary(self):
+        # Suppressing per-step events must not lose data: the summary already
+        # carries each step's duration under `steps`, so nothing is dropped.
+        client = MagicMock()
+        init_cache_stats()
+        t = make_telemetry(event_prefix="lookup", emit_step_events=False)
+        with t.track_step("library_search"):
+            pass
+        with t.track_step("album_lookup"):
+            pass
+
+        t.send_to_posthog(client)
+
+        summary = client.capture.call_args.kwargs["properties"]
+        assert summary["steps"] == {
+            "library_search_ms": pytest.approx(t.steps["library_search"].duration_ms),
+            "album_lookup_ms": pytest.approx(t.steps["album_lookup"].duration_ms),
+        }
+
+    def test_true_emits_per_step_events_as_before(self):
+        # Explicit True matches the historical behavior exactly (regression
+        # guard so the toggle can't silently invert).
+        client = MagicMock()
+        init_cache_stats()
+        t = make_telemetry(event_prefix="lookup", emit_step_events=True)
+        with t.track_step("library_search"):
+            pass
+
+        t.send_to_posthog(client)
+
+        events = [call.kwargs["event"] for call in client.capture.call_args_list]
+        assert events == ["lookup_library_search", "lookup_completed"]
