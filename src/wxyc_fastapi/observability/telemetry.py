@@ -117,19 +117,26 @@ class RequestTelemetry:
         emit_step_events: When ``True`` (default), :meth:`send_to_posthog` emits
             one ``<prefix>_<step>`` event per tracked step in addition to the
             ``<prefix>_completed`` summary. Set ``False`` to emit only the
-            summary — the per-step timings are still carried in the summary's
-            ``steps`` property, so no data is lost. Intended for high-volume
-            consumers whose per-step events are unconsumed: LML's ``/lookup``
-            registers ~9 steps, so the default fans one lookup out to ~10
-            PostHog events, and a backfill campaign multiplied ingestion
+            summary — the per-step *timings* are still carried in the summary's
+            ``steps`` property, so no timing data is lost. The only fields
+            dropped are the per-step ``success``/``error_type`` (a failed step's
+            error is not represented in the summary), so suppress only where
+            those per-step fields are themselves unconsumed. Intended for
+            high-volume consumers whose per-step events are unconsumed: LML's
+            ``/lookup`` registers ~9 steps, so the default fans one lookup out to
+            ~10 PostHog events, and a backfill campaign multiplied ingestion
             accordingly for no observability value. Consumers that build
             dashboards on the per-step events (request-o-matic) keep the default.
+            Keyword-only.
     """
 
     api_call_keys: list[str]
     distinct_id: str
     event_prefix: str
-    emit_step_events: bool = True
+    # Keyword-only so inserting it doesn't shift the positional argument order:
+    # ``steps`` stays the 4th positional field, keeping positional construction
+    # backward-compatible with pre-1.3.0 callers.
+    emit_step_events: bool = field(default=True, kw_only=True)
 
     steps: dict[str, StepResult] = field(default_factory=dict)
     api_calls: dict[str, int] = field(init=False)
@@ -254,8 +261,10 @@ class RequestTelemetry:
 
         When ``emit_step_events`` is ``True`` (the default) one
         ``<prefix>_<step>`` event is emitted per tracked step; when ``False``,
-        only the ``<prefix>_completed`` summary fires (the per-step timings are
-        still carried in the summary's ``steps`` property, so no data is lost).
+        only the ``<prefix>_completed`` summary fires (the per-step *timings*
+        are still carried in the summary's ``steps`` property, so no timing data
+        is lost — only the per-step ``success``/``error_type`` fields are
+        dropped).
 
         Cache stats are read from
         :func:`wxyc_fastapi.observability.cache_stats.get_cache_stats`. When
