@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-08-03
+
+Adds an `emit_step_events` toggle to `RequestTelemetry` so a high-volume consumer can emit only the `<prefix>_completed` summary and suppress the per-step PostHog events. Motivated by a Backend-Service backfill campaign that started 2026-08-01: LML's `/lookup` registers ~9 `track_step` legs, so the default fans one lookup out to ~10 PostHog events, and the backfill multiplied PostHog ingestion into the "Request-O-Matic" project ~7× (≈60k lookups/day → ≈440k events/day). None of the LML per-step events (`lookup_library_search`, `lookup_album_lookup`, `lookup_streaming_status`, …) are read by any insight or alert — only `lookup_completed` is — so they were pure ingestion cost. The per-step timings are already carried in the summary's `steps` property, so suppressing the per-step events loses no data.
+
+### Added
+- `RequestTelemetry.emit_step_events: bool = True` — new constructor field. When `True` (default) `send_to_posthog` emits one `<prefix>_<step>` event per tracked step plus the `<prefix>_completed` summary, exactly as before. When `False`, only the summary fires; the per-step durations remain available under `summary["steps"]` (`{<step>_ms: <duration>}`). The toggle is per-`RequestTelemetry` instance, so a consumer can suppress on one route while leaving others at the default.
+- `TestEmitStepEvents` (`tests/observability/test_telemetry.py`) — default-`True`, `False`-suppresses-per-step-keeping-only-summary, `False`-still-carries-every-step-timing-in-summary, and an explicit-`True`-matches-historical-behavior regression guard.
+
+### Consumer impact
+- Additive and backward-compatible (minor bump). The field defaults to `True`, so every existing call site — including request-o-matic, whose "Average Duration by Step" dashboards read the `request_<step>` per-step events, and LML's `streaming_check` / `artist_resolve` routes — is byte-identical with no code change. A consumer re-pins `>=1.2.0,<2.0.0` → `>=1.3.0,<2.0.0` only when it passes `emit_step_events=False`. First consumer: library-metadata-lookup, on its three `/lookup` `RequestTelemetry` construction sites.
+- **Release note:** `v1.2.0` was tagged in this CHANGELOG but never pushed, so no `1.2.0` artifact reached PyPI (latest published was `1.1.0`). `1.3.0` is the first release cut from that baseline and therefore ships both the 1.2.0 `as_server_timing(descriptions=)` work and this toggle. Consumers needing only the `descriptions=` surface may still pin `>=1.3.0,<2.0.0`.
+
+[1.3.0]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v1.3.0
+
 ## [1.2.0] - 2026-07-27
 
 Adds per-leg `desc` support to `RequestTelemetry.as_server_timing()`. Some legs are derived or overlapping rather than additive — LML's `discogs` leg (`pg_time_ms + api_time_ms`) double-counts time already reflected in another span, so summing every `dur` in the header does not reconstruct the total. A `desc="overlaps album_lookup and is not additive"` annotation makes that legible in the header itself instead of relying on out-of-band documentation.

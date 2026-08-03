@@ -8,7 +8,10 @@ to namespace step events (e.g. ``"lookup"`` produces ``lookup_parse``,
 
 ``send_to_posthog`` emits one PostHog event per tracked step plus a summary
 event carrying total duration, step timings, API-call counts, and the cache
-stats from :mod:`wxyc_fastapi.observability.cache_stats`.
+stats from :mod:`wxyc_fastapi.observability.cache_stats`. Set
+``emit_step_events=False`` to emit only the summary (whose ``steps`` property
+already carries every per-step timing) — for high-volume consumers whose
+per-step events are unconsumed.
 """
 
 from __future__ import annotations
@@ -111,11 +114,22 @@ class RequestTelemetry:
             Conventionally ``"<service-name>-service"``.
         event_prefix: Prefix used to namespace events. ``"lookup"`` produces
             ``lookup_<step>`` per-step events and a ``lookup_completed`` summary.
+        emit_step_events: When ``True`` (default), :meth:`send_to_posthog` emits
+            one ``<prefix>_<step>`` event per tracked step in addition to the
+            ``<prefix>_completed`` summary. Set ``False`` to emit only the
+            summary — the per-step timings are still carried in the summary's
+            ``steps`` property, so no data is lost. Intended for high-volume
+            consumers whose per-step events are unconsumed: LML's ``/lookup``
+            registers ~9 steps, so the default fans one lookup out to ~10
+            PostHog events, and a backfill campaign multiplied ingestion
+            accordingly for no observability value. Consumers that build
+            dashboards on the per-step events (request-o-matic) keep the default.
     """
 
     api_call_keys: list[str]
     distinct_id: str
     event_prefix: str
+    emit_step_events: bool = True
 
     steps: dict[str, StepResult] = field(default_factory=dict)
     api_calls: dict[str, int] = field(init=False)
@@ -236,7 +250,12 @@ class RequestTelemetry:
         posthog_client: Posthog,
         extra_properties: dict[str, Any] | None = None,
     ) -> None:
-        """Emit per-step events and a summary event to PostHog.
+        """Emit a summary event to PostHog, and per-step events unless suppressed.
+
+        When ``emit_step_events`` is ``True`` (the default) one
+        ``<prefix>_<step>`` event is emitted per tracked step; when ``False``,
+        only the ``<prefix>_completed`` summary fires (the per-step timings are
+        still carried in the summary's ``steps`` property, so no data is lost).
 
         Cache stats are read from
         :func:`wxyc_fastapi.observability.cache_stats.get_cache_stats`. When
@@ -245,17 +264,18 @@ class RequestTelemetry:
         """
         extra_properties = extra_properties or {}
 
-        for step_name, step_result in self.steps.items():
-            posthog_client.capture(
-                distinct_id=self.distinct_id,
-                event=f"{self.event_prefix}_{step_name}",
-                properties={
-                    "step": step_name,
-                    "duration_ms": round(step_result.duration_ms, 2),
-                    "success": step_result.success,
-                    "error_type": step_result.error_type,
-                },
-            )
+        if self.emit_step_events:
+            for step_name, step_result in self.steps.items():
+                posthog_client.capture(
+                    distinct_id=self.distinct_id,
+                    event=f"{self.event_prefix}_{step_name}",
+                    properties={
+                        "step": step_name,
+                        "duration_ms": round(step_result.duration_ms, 2),
+                        "success": step_result.success,
+                        "error_type": step_result.error_type,
+                    },
+                )
 
         cache_data = get_cache_stats()
         cache_props = cache_data.copy() if cache_data else _DEFAULT_CACHE_STATS.copy()
