@@ -1,5 +1,6 @@
 """Tests for wxyc_fastapi.observability.telemetry."""
 
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
@@ -491,3 +492,41 @@ class TestEmitStepEvents:
 
         events = [call.kwargs["event"] for call in client.capture.call_args_list]
         assert events == ["lookup_library_search", "lookup_completed"]
+
+    def test_emit_step_events_is_keyword_only(self):
+        # The flag is keyword-only, so inserting it does not shift the positional
+        # argument order: the 4th positional field stays `steps`, keeping
+        # positional construction backward-compatible with pre-1.3.0 callers.
+        kind = inspect.signature(RequestTelemetry).parameters["emit_step_events"].kind
+        assert kind is inspect.Parameter.KEYWORD_ONLY
+
+        seeded = {"parse": StepResult(duration_ms=1.0)}
+        t = RequestTelemetry(["discogs"], "test-service", "lookup", seeded)
+        assert t.steps == seeded
+        assert t.emit_step_events is True
+
+    def test_false_with_failing_step_drops_success_error_type_from_summary(self):
+        # Pins the documented limitation: suppressing per-step events keeps each
+        # step's *timing* in the summary but not its success/error_type — those
+        # lived only on the per-step event. Guards the "no timing data lost"
+        # claim from being over-read as "no data lost", and stops a silent
+        # regression that starts leaking per-step events on the failure path.
+        client = MagicMock()
+        init_cache_stats()
+        t = make_telemetry(event_prefix="lookup", emit_step_events=False)
+        with pytest.raises(ValueError, match="boom"):
+            with t.track_step("album_lookup"):
+                raise ValueError("boom")
+
+        t.send_to_posthog(client)
+
+        # The failing per-step event is suppressed; only the summary fires.
+        assert client.capture.call_count == 1
+        summary = client.capture.call_args.kwargs["properties"]
+        # Timing survives...
+        assert summary["steps"] == {
+            "album_lookup_ms": pytest.approx(t.steps["album_lookup"].duration_ms)
+        }
+        # ...but success/error_type are represented nowhere in the summary.
+        assert "success" not in summary
+        assert "error_type" not in summary
