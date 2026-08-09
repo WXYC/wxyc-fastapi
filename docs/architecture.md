@@ -5,11 +5,12 @@
 ```
 src/wxyc_fastapi/
 ├── __init__.py            # __version__
+├── testing.py             # v1.4.0 — CountingPosthog + capture_budget (consumer test helpers)
 ├── observability/         # v0.1.0 — Phase A
 │   ├── __init__.py        # re-exports (grows as PRs land)
 │   ├── cache_stats.py     # PR 1: init_cache_stats, CacheStatsRecorder, timed_pg, timed_api
 │   ├── sentry.py          # PR 2: init_sentry, add_breadcrumb, capture_exception
-│   ├── posthog.py         # PR 2: get_posthog_client (warn-once), flush, shutdown
+│   ├── posthog.py         # PR 2: get_posthog_client (warn-once), flush, shutdown; v1.4.0 capture rate limiter
 │   └── telemetry.py       # PR 3: RequestTelemetry, StepResult, track_step, send_to_posthog
 ├── healthcheck/           # v0.2.0 — Phase B
 │   ├── __init__.py        # re-exports
@@ -27,6 +28,7 @@ tests/
 │   ├── test_cache_stats.py  # PR 1
 │   ├── test_sentry.py       # PR 2
 │   ├── test_posthog.py      # PR 2
+│   ├── test_posthog_ratelimit.py  # v1.4.0
 │   └── test_telemetry.py    # PR 3
 ├── healthcheck/
 │   ├── fixtures/
@@ -36,8 +38,10 @@ tests/
 │   └── test_readiness.py
 ├── http/
 │   └── test_singleton.py           # Phase D: LML#241 reproducer + closer + retry semantics
-└── db/
-    └── test_lazy_pg.py             # Phase E: lazy connect + reconnect + connect-failure retry
+├── db/
+│   └── test_lazy_pg.py             # Phase E: lazy connect + reconnect + connect-failure retry
+└── testing/
+    └── test_capture_budget.py      # v1.4.0: CountingPosthog + capture_budget
 scripts/
 └── sync-api-yaml-schemas.py        # refresh the conformance fixture from a wxyc-shared tag
 ```
@@ -54,6 +58,12 @@ from wxyc_fastapi.observability import (
     timed_pg, timed_api,
     get_posthog_client, flush_posthog, shutdown_posthog,
 )
+```
+
+Consumer *test suites* additionally import the capture-budget helpers from `wxyc_fastapi.testing` (v1.4.0):
+
+```python
+from wxyc_fastapi.testing import CountingPosthog, capture_budget
 ```
 
 ## Per-consumer parameterization
@@ -81,6 +91,8 @@ The shared modules are parameterized so each consumer can keep its existing taxo
 | 1.0.0 | E | db/lazy_pg (sync psycopg, lifted verbatim from semantic-index `utils.py:14-42`) |
 | 1.1.0 | — | `RequestTelemetry.as_server_timing()` — serialize tracked steps to a `Server-Timing` header (additive; see [`observability.md`](observability.md#telemetry)) |
 | 1.2.0 | — | `as_server_timing(descriptions=...)` — per-leg `desc="..."` annotation for derived/overlapping legs, sanitized against header injection (additive; see [`observability.md`](observability.md#telemetry)) |
+| 1.3.0 | — | `RequestTelemetry(emit_step_events=False)` — suppress unconsumed per-step PostHog events, summary-only (additive; see [`observability.md`](observability.md#telemetry)) |
+| 1.4.0 | — | PostHog capture rate limiter (token-bucket proxy from `get_posthog_client`, `telemetry_rate_limited` drop reports) + `wxyc_fastapi.testing` capture-budget helpers (see [`observability.md`](observability.md#posthog-wrapper)) |
 
 The package follows SemVer. Now that 1.0 is cut, consumers pin the major range `wxyc-fastapi>=1.x,<2` (e.g. a consumer that calls a method added in 1.1.0 pins `>=1.1.0,<2.0.0`); a breaking change bumps to 2.0.0.
 

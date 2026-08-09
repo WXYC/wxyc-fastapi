@@ -58,7 +58,11 @@ class TestGetPosthogClient:
             MockPosthog.return_value = MagicMock(name="ph_instance")
             client = get_posthog_client("request")
             MockPosthog.assert_called_once_with("phc_test123", host="https://us.i.posthog.com")
-            assert client is MockPosthog.return_value
+            # The returned client is the rate-limiting proxy, not the raw SDK
+            # instance — assert delegation instead of identity.
+            assert client is not None
+            client.capture(distinct_id="d", event="e")
+            MockPosthog.return_value.capture.assert_called_once_with(distinct_id="d", event="e")
 
     def test_uses_custom_host_when_set(self, monkeypatch):
         monkeypatch.setenv("POSTHOG_API_KEY", "phc_test123")
