@@ -1,8 +1,9 @@
-"""Tests for wxyc_fastapi.observability.posthog."""
+"""Tests for wxyc_fastapi.observability.posthog.
+
+Singleton state reset lives in this directory's conftest.py.
+"""
 
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 import wxyc_fastapi.observability.posthog as ph_module
 from wxyc_fastapi.observability.posthog import (
@@ -10,16 +11,6 @@ from wxyc_fastapi.observability.posthog import (
     get_posthog_client,
     shutdown_posthog,
 )
-
-
-@pytest.fixture(autouse=True)
-def _reset_posthog_state():
-    """Each test starts with a fresh client + empty warn-once set."""
-    ph_module._client = None
-    ph_module._warned_prefixes.clear()
-    yield
-    ph_module._client = None
-    ph_module._warned_prefixes.clear()
 
 
 class TestGetPosthogClient:

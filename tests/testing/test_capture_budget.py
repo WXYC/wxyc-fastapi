@@ -2,7 +2,7 @@
 
 import pytest
 
-from wxyc_fastapi.testing import CountingPosthog, capture_budget
+from wxyc_fastapi.testing import CountingPosthog, as_posthog, capture_budget
 
 
 class TestCountingPosthog:
@@ -16,12 +16,39 @@ class TestCountingPosthog:
         assert captured.distinct_id == "svc"
         assert captured.properties == {"a": 1}
 
-    def test_records_positional_capture(self):
+    def test_records_modern_positional_event(self):
         ph = CountingPosthog()
-        ph.capture("uid", "evt_a")
+        ph.capture("evt_a", distinct_id="uid")
 
         assert ph.events == ["evt_a"]
         assert ph.captures[0].distinct_id == "uid"
+
+    def test_legacy_two_positional_form_raises(self):
+        # posthog 7.x (what both consumers pin) silently logs-and-discards
+        # capture("uid", "evt") — the event never exists. The fake raises
+        # instead of recording it, so a budget test cannot certify telemetry
+        # that production would drop.
+        ph = CountingPosthog()
+        with pytest.raises(TypeError):
+            ph.capture("uid", "evt_a")
+
+    def test_capture_without_event_raises(self):
+        ph = CountingPosthog()
+        with pytest.raises(TypeError):
+            ph.capture(distinct_id="svc")
+
+    def test_capture_exception_records_exception_event(self):
+        ph = CountingPosthog()
+        ph.capture_exception(ValueError("boom"), distinct_id="svc")
+
+        assert ph.events == ["$exception"]
+        assert ph.count("$exception") == 1
+
+    def test_feature_flag_reads_return_none(self):
+        ph = CountingPosthog()
+        assert ph.feature_enabled("some-flag", "uid") is None
+        assert ph.get_feature_flag("some-flag", "uid") is None
+        assert ph.captures == []  # flag reads record nothing
 
     def test_count_total_and_per_event(self):
         ph = CountingPosthog()
@@ -38,6 +65,10 @@ class TestCountingPosthog:
         ph = CountingPosthog()
         ph.flush()
         ph.shutdown()
+
+    def test_as_posthog_returns_same_object(self):
+        ph = CountingPosthog()
+        assert as_posthog(ph) is ph
 
 
 class TestCaptureBudget:

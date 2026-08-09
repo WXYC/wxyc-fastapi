@@ -6,11 +6,7 @@
 
 The motivation, drift inventory, phasing (A → E), and decisions are in [the wiki plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md). Project board: [WXYC #29](https://github.com/orgs/WXYC/projects/29). Epic: [#1](https://github.com/WXYC/wxyc-fastapi/issues/1).
 
-Phase A (issue [#2](https://github.com/WXYC/wxyc-fastapi/issues/2)) shipped across three sequential PRs:
-
-1. **PR 1**: package scaffolding + `cache_stats` module
-2. **PR 2**: `sentry` + `posthog` modules
-3. **PR 3 (this branch)**: `telemetry` module — completes the v0.1.0 surface, tag cut after merge.
+Phases A–E all shipped (Phase A was issue [#2](https://github.com/WXYC/wxyc-fastapi/issues/2), three sequential PRs: scaffolding + `cache_stats`; `sentry` + `posthog`; `telemetry`). The package is on PyPI at 1.x; see `docs/architecture.md` for the versioning ladder and `CHANGELOG.md` for what each release added.
 
 ## Topic guides
 
@@ -38,7 +34,7 @@ python3.12 -m venv .venv
 ### Test + lint
 
 ```bash
-.venv/bin/pytest                       # 122 tests across observability + healthcheck + http + db (incl. Phase C conformance)
+.venv/bin/pytest                       # full suite: observability + healthcheck + http + db + testing helpers (incl. Phase C conformance)
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
 ```

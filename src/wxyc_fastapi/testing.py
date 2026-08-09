@@ -12,29 +12,36 @@ per-operation event count was never pinned by a test. Budget the hot paths:
 one operation should emit at most one summary event, and a bulk job over N
 items should emit O(1) events per run, not O(N).
 
+Fidelity note: ``capture`` mirrors the posthog 7.x signature the consumers pin
+— ``capture(event, *, distinct_id=..., properties=..., ...)``. The legacy
+``capture("uid", "event")`` two-positional form raises ``TypeError`` here; the
+real 7.x SDK logs an error and silently discards that call, so a budget test
+must fail loudly rather than certify telemetry production would drop.
+
 No ``posthog`` install is needed — these are plain objects satisfying the
 client surface that ``RequestTelemetry.send_to_posthog`` and
-``get_posthog_client`` consumers use.
+``get_posthog_client`` consumers use. Where a call site is annotated
+``Posthog | None``, pass the fake through :func:`as_posthog` to satisfy mypy.
 
 Example::
 
-    from wxyc_fastapi.testing import capture_budget
+    from wxyc_fastapi.testing import as_posthog, capture_budget
 
     def test_lookup_emits_one_summary_event():
-        with capture_budget(1) as posthog_client:
-            run_lookup(..., posthog_client=posthog_client)
+        with capture_budget(1) as ph:
+            run_lookup(..., posthog_client=as_posthog(ph))
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-from wxyc_fastapi.observability.posthog import _capture_event_name
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from posthog import Posthog
 
 
 @dataclass(frozen=True)
@@ -52,17 +59,40 @@ class CountingPosthog:
 
     captures: list[CapturedEvent] = field(default_factory=list)
 
-    def capture(self, *args: Any, **kwargs: Any) -> None:
-        distinct_id = kwargs.get("distinct_id")
-        if distinct_id is None and len(args) >= 2:
-            distinct_id = args[0]
+    def capture(
+        self,
+        event: str,
+        *,
+        distinct_id: str | None = None,
+        properties: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        """Record a capture. Signature mirrors the posthog 7.x SDK, so the
+        legacy two-positional form fails here exactly where production would
+        silently drop it."""
         self.captures.append(
-            CapturedEvent(
-                event=_capture_event_name(args, kwargs),
-                distinct_id=distinct_id,
-                properties=kwargs.get("properties"),
-            )
+            CapturedEvent(event=event, distinct_id=distinct_id, properties=properties)
         )
+
+    def capture_exception(
+        self,
+        exception: BaseException | None = None,
+        distinct_id: str | None = None,
+        properties: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        """Record an exception capture as a ``$exception`` event."""
+        self.captures.append(
+            CapturedEvent(event="$exception", distinct_id=distinct_id, properties=properties)
+        )
+
+    def feature_enabled(self, *_args: Any, **_kwargs: Any) -> bool | None:
+        """Flag reads resolve to ``None`` (unknown flag), recording nothing."""
+        return None
+
+    def get_feature_flag(self, *_args: Any, **_kwargs: Any) -> Any:
+        """Flag reads resolve to ``None`` (unknown flag), recording nothing."""
+        return None
 
     def flush(self) -> None:
         """No-op, present so code that flushes a real client runs unchanged."""
@@ -80,6 +110,17 @@ class CountingPosthog:
         if event is None:
             return len(self.captures)
         return sum(1 for captured in self.captures if captured.event == event)
+
+
+def as_posthog(client: CountingPosthog) -> Posthog:
+    """Type-cast a :class:`CountingPosthog` for ``Posthog``-annotated call sites.
+
+    The fake has no runtime relationship to ``posthog.Posthog`` (importing the
+    SDK is exactly what these helpers avoid), so consumer code annotated
+    ``Posthog | None`` fails mypy when handed the fake directly. This is a
+    zero-cost ``typing.cast`` — it returns the same object.
+    """
+    return cast("Posthog", client)
 
 
 @contextmanager
