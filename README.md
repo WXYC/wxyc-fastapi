@@ -2,17 +2,18 @@
 
 Shared FastAPI service template for WXYC's Python services. Consolidates the duplicated service scaffolding currently forked across [library-metadata-lookup (LML)](https://github.com/WXYC/library-metadata-lookup), [request-o-matic (rom)](https://github.com/WXYC/request-o-matic), and [semantic-index](https://github.com/WXYC/semantic-index) into a single package, eliminates measurable drift between the three forks, and gives the next FastAPI service a template to inherit instead of fork.
 
-**Status:** scaffolding. The implementation plan is at [`WXYC/wiki/plans/wxyc-fastapi`](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md). The rollout is tracked in the org-level project board *wxyc-fastapi rollout* and traces back to **P1** of the [2026-05-10 cross-repo contract audit (WXYC/wiki#51)](https://github.com/WXYC/wiki/issues/51).
+**Status:** shipping — published to PyPI as [`wxyc-fastapi`](https://pypi.org/project/wxyc-fastapi/) (1.x; phases A–E landed, see `CHANGELOG.md`), consumed by library-metadata-lookup, request-o-matic, and semantic-index. The original implementation plan is at [`WXYC/wiki/plans/wxyc-fastapi`](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md); it traces back to **P1** of the [2026-05-10 cross-repo contract audit (WXYC/wiki#51)](https://github.com/WXYC/wiki/issues/51).
 
-## Package surface (planned)
+## Package surface
 
 ```
 wxyc_fastapi/
 ├── observability/
 │   ├── sentry.py        # init_sentry(), add_breadcrumb(), capture_exception()
-│   ├── telemetry.py     # RequestTelemetry, StepResult, track_step
+│   ├── telemetry.py     # RequestTelemetry, StepResult, track_step, as_server_timing
 │   ├── cache_stats.py   # ContextVar, init_cache_stats, record_*, get_cache_stats
-│   └── posthog.py       # get_posthog_client(event_prefix), flush_posthog(), shutdown_posthog()
+│   └── posthog.py       # get_posthog_client(event_prefix) — capture rate limiter, flush, shutdown
+├── testing.py           # CountingPosthog + capture_budget: pin per-operation capture counts in tests
 ├── http/
 │   └── singleton.py     # async_singleton(factory) - getter+closer pair w/ asyncio.Lock
 ├── healthcheck/
