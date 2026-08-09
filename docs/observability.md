@@ -14,6 +14,12 @@ The `wxyc_fastapi.observability` module ships three coupled concerns: cache stat
 
 The `posthog` SDK is imported inside `get_posthog_client` on first successful call (when an API key is set). Consumers that never call it do not need the `[posthog]` extra installed — semantic-index relies on this.
 
+Unless disabled, the returned client is a token-bucket **capture rate limiter** (v1.4.0) around the SDK client, sized by `POSTHOG_RATELIMIT_EVENTS_PER_MINUTE` (default 60, sustained) and `POSTHOG_RATELIMIT_BURST` (default 1800, bucket capacity); env vars are read once, at first client construction, and `POSTHOG_RATELIMIT_EVENTS_PER_MINUTE=0` disables wrapping entirely (raw SDK client returned). Only `capture` is gated — feature-flag reads, `flush`, `shutdown`, and `capture_exception` delegate untouched (exceptions bill under PostHog error tracking's separate quota). Dropped captures batch into at most one `telemetry_rate_limited` event per minute, carrying `dropped_count`, `sample_events` (up to 5 distinct dropped names), `limit_events_per_minute`, and `burst`; the first drop after a quiet stretch reports immediately, and every report also logs at WARNING. The limiter is a per-process circuit breaker for runaway instrumentation — the 2026-08-04 org-wide quota cutoff — not a budget enforcer: an N-worker deploy admits N× the configured rate (tune the env down per worker, e.g. LML's three), and legitimate bulk work that trips it should aggregate to per-run summary events rather than raise the limit.
+
+## Testing helpers
+
+`wxyc_fastapi.testing` (v1.4.0) ships `CountingPosthog` — an in-memory client stand-in that records every `capture` as a `CapturedEvent(event, distinct_id, properties)` and no-ops `flush`/`shutdown` — and `capture_budget(max_events, client=None)`, a context manager that yields a `CountingPosthog` and fails the test with the captured event names when the block records more than `max_events`. Budget the hot paths in consumer suites: one lookup/request should emit at most one summary event, and a bulk job over N items should emit O(1) events per run, not O(N). The helpers need no `posthog` install, so they work in suites that stub the client everywhere.
+
 ## Telemetry
 
 `RequestTelemetry(api_call_keys, distinct_id, event_prefix, emit_step_events=True)` tracks step timings + per-service API-call counts for a single request. The `event_prefix` namespaces the emitted PostHog events: `lookup` produces `lookup_<step>` per-step events and a `lookup_completed` summary; `request` produces `request_<step>` and `request_completed`.
