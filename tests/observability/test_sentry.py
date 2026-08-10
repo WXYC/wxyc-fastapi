@@ -96,6 +96,32 @@ class TestInitSentry:
             )
         assert mock_init.call_args.kwargs["before_send"] is my_filter
 
+    def test_before_send_transaction_passed_through(self):
+        called = []
+
+        def my_filter(event, hint):
+            called.append((event, hint))
+            return event
+
+        with (
+            patch("wxyc_fastapi.observability.sentry.sentry_sdk.init") as mock_init,
+            patch("wxyc_fastapi.observability.sentry.sentry_sdk.set_tag"),
+        ):
+            init_sentry(
+                dsn="https://test@sentry.example/1",
+                service_name="test-service",
+                before_send_transaction=my_filter,
+            )
+        assert mock_init.call_args.kwargs["before_send_transaction"] is my_filter
+
+    def test_before_send_transaction_defaults_to_none(self):
+        with (
+            patch("wxyc_fastapi.observability.sentry.sentry_sdk.init") as mock_init,
+            patch("wxyc_fastapi.observability.sentry.sentry_sdk.set_tag"),
+        ):
+            init_sentry(dsn="https://test@sentry.example/1", service_name="test-service")
+        assert mock_init.call_args.kwargs["before_send_transaction"] is None
+
     def test_caller_can_override_integrations(self):
         with (
             patch("wxyc_fastapi.observability.sentry.sentry_sdk.init") as mock_init,

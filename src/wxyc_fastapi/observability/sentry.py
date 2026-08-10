@@ -44,6 +44,7 @@ def init_sentry(
     release: str | None = None,
     integrations: list[Integration] | None = None,
     before_send: Callable[[Event, Hint], Event | None] | None = None,
+    before_send_transaction: Callable[[Event, Hint], Event | None] | None = None,
     traces_sample_rate: float = 1.0,
     sample_rate: float = 1.0,
 ) -> None:
@@ -65,7 +66,22 @@ def init_sentry(
             and ``Hint``; return ``None`` to drop an event or return the
             (possibly modified) Event to forward it. Useful for filtering
             handled-error classes that you log but don't want tracked in Sentry.
-        traces_sample_rate: Performance-tracing sample rate (0.0-1.0). Default 1.0.
+        before_send_transaction: Optional transaction filter, fired once per
+            transaction envelope. This is the only hook that can drop
+            individual child spans: mutate ``event["spans"]`` (filter out the
+            noisy ones) and return the modified Event to keep the transaction
+            with fewer spans. Returning ``None`` drops the *entire*
+            transaction, including all of its spans — a much blunter
+            operation than filtering ``event["spans"]``, and distinct from
+            ``before_send``, which only ever sees error events, never
+            transactions.
+        traces_sample_rate: Performance-tracing sample rate (0.0-1.0). Default
+            1.0. This default is deliberately unchanged by the
+            ``before_send_transaction`` passthrough above — LML's
+            ``lookup/router.py`` measurement series assumes full-fidelity
+            traces, so lowering it needs its own PR with a CHANGELOG
+            breaking-change note and a consumer fan-out, not a silent bundle
+            with a new filtering hook.
         sample_rate: Error-event sample rate (0.0-1.0). Default 1.0.
     """
     if not dsn:
@@ -81,6 +97,7 @@ def init_sentry(
         release=release,
         integrations=integrations,
         before_send=before_send,
+        before_send_transaction=before_send_transaction,
         traces_sample_rate=traces_sample_rate,
         sample_rate=sample_rate,
     )

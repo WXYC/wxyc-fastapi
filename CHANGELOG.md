@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-08-10
+
+Adds a `before_send_transaction` passthrough to `init_sentry`, symmetric with the existing `before_send`. Motivated by the WXYC Sentry org crossing 80% of its monthly reserved span budget on 2026-08-10: spans and errors sit in separate quota buckets, so `traces_sample_rate=1.0` (unchanged by this release — see below) keeps every service tracing at full fidelity, and `before_send_transaction` is the only hook available to shed noise at the span level rather than the sample-rate level. Concretely, this unblocks LML dropping asyncpg's connection-reset statement (`SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;`), which alone accounted for 1,528,070 spans in 14 days — 19% of the org's total span consumption — with one fixed, sub-millisecond, pool-bookkeeping description.
+
+### Added
+- `init_sentry(..., before_send_transaction=None)` — optional, keyword-only callable forwarded to `sentry_sdk.init`. Fires once per transaction envelope. Mutate `event["spans"]` and return the modified `Event` to drop individual child spans while keeping the transaction; return `None` to drop the entire transaction, including all of its spans — a much blunter operation, and the key distinction from `before_send`, which only ever sees error events, never transactions.
+- `TestInitSentry.test_before_send_transaction_passed_through` / `test_before_send_transaction_defaults_to_none` (`tests/observability/test_sentry.py`) — mirror the existing `before_send` coverage: the callable reaches `sentry_sdk.init` unchanged, and omitting it preserves `None`.
+
+### Decided
+- `traces_sample_rate` keeps its `1.0` default in this release. Lowering it would alter the telemetry of every consumer at once, including LML's `lookup/router.py` measurement series, which explicitly assumes full-fidelity traces. A lower default needs its own PR with a CHANGELOG breaking-change note and a named consumer fan-out, not a silent bundle with this passthrough.
+
+### Consumer impact
+- Additive and backward-compatible (minor bump). `before_send_transaction` defaults to `None`, so every existing call site is byte-identical with no code change. A consumer re-pins `>=1.4.0,<2.0.0` → `>=1.5.0,<2.0.0` only when it passes `before_send_transaction=`. First consumer: library-metadata-lookup, filtering the asyncpg reset-span noise.
+
+[1.5.0]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v1.5.0
+
 ## [1.4.0] - 2026-08-09
 
 Adds a process-wide capture rate limiter to the PostHog wrapper, plus consumer-facing capture-budget test helpers. Both are the structural follow-through on the 2026-08-04 incident that 1.3.0's `emit_step_events` toggle mitigated case-by-case: LML's per-step `lookup_*` events (emitted into the "Request-O-Matic" PostHog project via a shared `POSTHOG_API_KEY`) reached ≈434k events/day during a Backend-Service bulk campaign, exhausted the org-wide PostHog product-analytics event quota, and ingestion for every WXYC project cut off at 2026-08-05 00:46 UTC. The toggle removed that one flood; the limiter bounds the next one no matter which capture site causes it, and the budget helpers let consumer tests pin per-operation event counts so the next flood never ships.
