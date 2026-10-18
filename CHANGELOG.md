@@ -5,10 +5,13 @@ All notable changes to this project will be documented in this file. Format foll
 ## [Unreleased]
 
 ### Added
-- `wxyc_fastapi.observability.errors` — PostHog error reporting to replace Sentry's `LoggingIntegration`. `get_posthog_errors_client()` returns a singleton keyed by `POSTHOG_ERRORS_API_KEY` (separate from the analytics `POSTHOG_API_KEY`; `None` when unset; frame locals off), and `PosthogErrorsHandler` is a `logging.Handler` for ERROR and above. Records with `exc_info` go through the SDK's `capture_exception`; message-only records (which `capture_exception` silently drops) are sent as a synthesized `$exception` event with a one-entry `$exception_list` (`mechanism = {handled: true, type: "logging"}`) and `$exception_fingerprint = [logger name, unformatted msg]`, so occurrences group by call site. Both paths sit behind a token bucket (`ERRORS_EVENTS_PER_MINUTE`, `ERRORS_BURST`) and a same-fingerprint dedupe window (`ERRORS_DEDUPE_WINDOW_SECONDS`), because the PostHog free plan caps exceptions at 100K/month. The handler ignores records from the `posthog` and `wxyc_fastapi` loggers and guards against same-thread re-entrancy.
+- `wxyc_fastapi.observability.errors` — PostHog error reporting to replace Sentry's `LoggingIntegration`. `get_posthog_errors_client()` returns a singleton keyed by `POSTHOG_ERRORS_API_KEY` (separate from the analytics `POSTHOG_API_KEY`; `None` when unset; frame locals off), and `PosthogErrorsHandler` is a `logging.Handler` for ERROR and above. Records with `exc_info` go through the SDK's `capture_exception`; message-only records (which `capture_exception` silently drops) are sent as a synthesized `$exception` event with a one-entry `$exception_list` (`mechanism = {handled: true, type: "logging"}`) and `$exception_fingerprint = "<logger name>:<unformatted msg>"` (one string; PostHog types the field `Option<String>` and drops events that send a list), so occurrences group by call site. Both paths sit behind a token bucket (`ERRORS_EVENTS_PER_MINUTE`, `ERRORS_BURST`) and a same-fingerprint dedupe window (`ERRORS_DEDUPE_WINDOW_SECONDS`), because the PostHog free plan caps exceptions at 100K/month. Drops log one WARNING at most once a minute with the count. The handler ignores records from the `posthog` and `wxyc_fastapi.observability` logger trees (the rest of the package, e.g. `wxyc_fastapi.healthcheck`, is reported) and guards against same-thread re-entrancy.
+
+### Changed
+- The `posthog` extra's floor rises from `>=3.0` to `>=6.9`, the first release with the `capture_exception_code_variables` constructor argument the errors client passes (posthog-python 6.9.0, 2025-11-06).
 
 ### Consumer impact
-- Additive; no existing call site changes. Unreleased — no version bump or tag in this change.
+- Additive; no existing call site changes. A consumer pinning `posthog<6.9` must raise its pin to install the `[posthog]` extra (the known consumers pin 7.x). Unreleased — no version bump or tag in this change.
 
 ## [1.5.0] - 2026-08-10
 

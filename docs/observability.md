@@ -25,10 +25,10 @@ Dropped captures batch into at most one `telemetry_rate_limited` event per minut
 `get_posthog_errors_client()` (`observability/errors.py`) returns a singleton `PosthogErrorsClient` keyed by `POSTHOG_ERRORS_API_KEY`, or `None` when unset — so a service can send errors to a different PostHog project than its analytics. `PosthogErrorsHandler(client)` is the `logging.Handler` that replaces Sentry's `LoggingIntegration` ("ERROR is alertable"): attach it to the root logger when the client is non-`None`.
 
 - **With `exc_info`:** forwarded to the SDK's `capture_exception`.
-- **Without it:** the SDK's `capture_exception` returns nothing when no exception is active, so the client sends a synthesized `$exception` event instead — `$exception_list` holds one entry (type = logger name, value = `record.getMessage()`, `mechanism = {handled: true, type: "logging"}`) and `$exception_fingerprint = [record.name, record.msg]`. The unformatted template groups by call site.
-- **Backstop:** one token bucket (`ERRORS_EVENTS_PER_MINUTE`, `ERRORS_BURST`) and a same-fingerprint dedupe window (`ERRORS_DEDUPE_WINDOW_SECONDS`) gate both paths in the client; deduped repeats cost no token. Per-process, like the analytics limiter. The dedupe table is bounded.
-- **Re-entrancy:** records from the `posthog` and `wxyc_fastapi` loggers are ignored, as are records logged on the same thread while a capture is in flight.
-- Frame locals (`capture_exception_code_variables`) are off.
+- **Without it:** the SDK's `capture_exception` returns nothing when no exception is active, so the client sends a synthesized `$exception` event instead — `$exception_list` holds one entry (type = logger name, value = `record.getMessage()`, `mechanism = {handled: true, type: "logging"}`) and `$exception_fingerprint = f"{record.name}:{record.msg}"` — one string, because PostHog types the field `Option<String>` and drops an event that sends a list. The unformatted template groups by call site. Limitation: a call site that pre-formats its message (`logger.error(f"failed for {name}")`) has a different template per value, so it neither groups nor dedupes; use `%s` arguments.
+- **Backstop:** one token bucket (`ERRORS_EVENTS_PER_MINUTE`, `ERRORS_BURST`) and a same-fingerprint dedupe window (`ERRORS_DEDUPE_WINDOW_SECONDS`) gate both paths in the client; deduped repeats cost no token. Per-process, like the analytics limiter. The dedupe table is bounded. Dropped records are counted and logged as one WARNING at most once a minute.
+- **Re-entrancy:** records from the `posthog` and `wxyc_fastapi.observability` logger trees are ignored (other package loggers such as `wxyc_fastapi.healthcheck` are reported), as are records logged on the same thread while a capture is in flight.
+- Frame locals (`capture_exception_code_variables`, posthog>=6.9) are off.
 
 ## Testing helpers
 
