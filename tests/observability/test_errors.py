@@ -143,7 +143,14 @@ class TestHandlerWithoutExcInfo:
             c.kwargs["properties"]["$exception_fingerprint"] for c in inner.capture.call_args_list
         ]
         # The second record is deduped, but both would share this fingerprint.
-        assert fingerprints == [["svc.lookup", "lookup failed for %s"]]
+        # PostHog types $exception_fingerprint as Option<String>; a list is dropped.
+        assert fingerprints == ["svc.lookup:lookup failed for %s"]
+
+    def test_empty_exc_info_tuple_synthesizes_exception_event(self):
+        inner = MagicMock()
+        PosthogErrorsHandler(_client(inner)).handle(_record(exc_info=(None, None, None)))
+        inner.capture_exception.assert_not_called()
+        inner.capture.assert_called_once()
 
     def test_levels_below_error_are_ignored(self):
         inner = MagicMock()
@@ -164,15 +171,46 @@ class TestHandlerWithoutExcInfo:
         PosthogErrorsHandler(_client(inner)).handle(_record())  # must not raise
 
 
+class TestDistinctId:
+    def test_both_paths_use_the_fixed_errors_distinct_id(self):
+        inner = MagicMock()
+        handler = PosthogErrorsHandler(_client(inner))
+        handler.handle(_record("a"))
+        handler.handle(_record("b", exc_info=_exc_info()))
+        assert inner.capture.call_args.kwargs["distinct_id"] == "wxyc-fastapi-errors"
+        assert inner.capture_exception.call_args.kwargs["distinct_id"] == "wxyc-fastapi-errors"
+
+
 class TestReentrancy:
     @pytest.mark.parametrize(
-        "name", ["posthog", "posthog.client", "wxyc_fastapi.observability.posthog", "wxyc_fastapi"]
+        "name",
+        [
+            "posthog",
+            "posthog.client",
+            "wxyc_fastapi.observability",
+            "wxyc_fastapi.observability.posthog",
+            "wxyc_fastapi.observability.errors",
+        ],
     )
     def test_own_logger_output_is_not_captured(self, name):
         inner = MagicMock()
         PosthogErrorsHandler(_client(inner)).handle(_record(name=name))
         inner.capture.assert_not_called()
         inner.capture_exception.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "wxyc_fastapi",
+            "wxyc_fastapi.healthcheck.readiness",
+            "wxyc_fastapi.observability_extras",
+            "posthog_helpers",
+        ],
+    )
+    def test_other_package_loggers_are_captured(self, name):
+        inner = MagicMock()
+        PosthogErrorsHandler(_client(inner)).handle(_record(name=name, exc_info=_exc_info()))
+        inner.capture_exception.assert_called_once()
 
     def test_logging_error_from_inside_capture_does_not_recurse(self):
         inner = MagicMock()
@@ -225,6 +263,24 @@ class TestBucket:
         handler.handle(_record("other"))
 
         assert inner.capture.call_count == 2
+
+
+class TestDropLogging:
+    def test_drops_log_one_rate_limited_warning(self, caplog):
+        inner = MagicMock()
+        clock = FakeClock()
+        client = _client(inner, clock, events_per_minute=60, burst=1)
+        with caplog.at_level(logging.WARNING, logger=errors_module.__name__):
+            client.capture_message(logger_name="svc", template="a", message="a")
+            client.capture_message(logger_name="svc", template="a", message="a")  # deduped
+            client.capture_message(logger_name="svc", template="b", message="b")  # no token
+            assert len(caplog.records) == 1
+            clock.advance(errors_module._DROP_LOG_INTERVAL_SECONDS + 1)
+            client.capture_message(logger_name="svc", template="a", message="a")  # admitted
+            client.capture_message(logger_name="svc", template="c", message="c")  # no token
+        assert len(caplog.records) == 2
+        assert all(r.levelno == logging.WARNING for r in caplog.records)
+        assert "dropped" in caplog.records[0].getMessage()
 
 
 class TestDedupe:
