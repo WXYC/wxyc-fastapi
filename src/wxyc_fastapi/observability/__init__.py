@@ -8,6 +8,12 @@ from wxyc_fastapi.observability.cache_stats import (
     timed_api,
     timed_pg,
 )
+from wxyc_fastapi.observability.errors import (
+    PosthogErrorsClient,
+    PosthogErrorsHandler,
+    get_posthog_errors_client,
+    shutdown_posthog_errors,
+)
 from wxyc_fastapi.observability.posthog import (
     flush_posthog,
     get_posthog_client,
@@ -25,6 +31,8 @@ from wxyc_fastapi.observability.telemetry import (
 
 __all__ = [
     "CacheStatsRecorder",
+    "PosthogErrorsClient",
+    "PosthogErrorsHandler",
     "RequestTelemetry",
     "StepResult",
     "add_breadcrumb",
@@ -33,9 +41,11 @@ __all__ = [
     "get_cache_stats",
     "get_cache_stats_recorder",
     "get_posthog_client",
+    "get_posthog_errors_client",
     "init_cache_stats",
     "init_sentry",
     "shutdown_posthog",
+    "shutdown_posthog_errors",
     "timed_api",
     "timed_pg",
 ]

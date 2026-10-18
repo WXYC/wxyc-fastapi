@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `wxyc_fastapi.observability.errors` — PostHog error reporting to replace Sentry's `LoggingIntegration`. `get_posthog_errors_client()` returns a singleton keyed by `POSTHOG_ERRORS_API_KEY` (separate from the analytics `POSTHOG_API_KEY`; `None` when unset; frame locals off), and `PosthogErrorsHandler` is a `logging.Handler` for ERROR and above. Records with `exc_info` go through the SDK's `capture_exception`; message-only records (which `capture_exception` silently drops) are sent as a synthesized `$exception` event with a one-entry `$exception_list` (`mechanism = {handled: true, type: "logging"}`) and `$exception_fingerprint = [logger name, unformatted msg]`, so occurrences group by call site. Both paths sit behind a token bucket (`ERRORS_EVENTS_PER_MINUTE`, `ERRORS_BURST`) and a same-fingerprint dedupe window (`ERRORS_DEDUPE_WINDOW_SECONDS`), because the PostHog free plan caps exceptions at 100K/month. The handler ignores records from the `posthog` and `wxyc_fastapi` loggers and guards against same-thread re-entrancy.
+
+### Consumer impact
+- Additive; no existing call site changes. Unreleased — no version bump or tag in this change.
+
 ## [1.5.0] - 2026-08-10
 
 Adds a `before_send_transaction` passthrough to `init_sentry`, symmetric with the existing `before_send`. Motivated by the WXYC Sentry org crossing 80% of its monthly reserved span budget on 2026-08-10: spans and errors sit in separate quota buckets, so `traces_sample_rate=1.0` (unchanged by this release — see below) keeps every service tracing at full fidelity, and `before_send_transaction` is the only hook available to shed noise at the span level rather than the sample-rate level. Concretely, this unblocks LML dropping asyncpg's connection-reset statement (`SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;`), which alone accounted for 1,528,070 spans in 14 days — 19% of the org's total span consumption — with one fixed, sub-millisecond, pool-bookkeeping description.

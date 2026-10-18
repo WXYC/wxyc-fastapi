@@ -20,6 +20,16 @@ Unless disabled, the returned client is a token-bucket **capture rate limiter** 
 
 Dropped captures batch into at most one `telemetry_rate_limited` event per minute, carrying `dropped_count`, `sample_events` (up to 5 distinct dropped names), `limit_events_per_minute`, `burst`, and `trigger_distinct_id`, emitted under the stable identity `wxyc-fastapi-ratelimiter` so alerts can key on it. The first drop after a quiet stretch reports immediately; a pending tail is drained by the next admitted capture past the report interval and force-drained by `flush`/`shutdown`, so a flood that simply ends is still accounted for. Every report also logs at WARNING. The limiter is a per-process circuit breaker for runaway instrumentation — the 2026-08-04 org-wide quota cutoff — not a budget enforcer: an N-worker deploy admits N× the configured rate (tune the env down per worker, e.g. LML's three), and legitimate bulk work that trips it should aggregate to per-run summary events rather than raise the limit.
 
+## PostHog errors client and logging handler
+
+`get_posthog_errors_client()` (`observability/errors.py`) returns a singleton `PosthogErrorsClient` keyed by `POSTHOG_ERRORS_API_KEY`, or `None` when unset — so a service can send errors to a different PostHog project than its analytics. `PosthogErrorsHandler(client)` is the `logging.Handler` that replaces Sentry's `LoggingIntegration` ("ERROR is alertable"): attach it to the root logger when the client is non-`None`.
+
+- **With `exc_info`:** forwarded to the SDK's `capture_exception`.
+- **Without it:** the SDK's `capture_exception` returns nothing when no exception is active, so the client sends a synthesized `$exception` event instead — `$exception_list` holds one entry (type = logger name, value = `record.getMessage()`, `mechanism = {handled: true, type: "logging"}`) and `$exception_fingerprint = [record.name, record.msg]`. The unformatted template groups by call site.
+- **Backstop:** one token bucket (`ERRORS_EVENTS_PER_MINUTE`, `ERRORS_BURST`) and a same-fingerprint dedupe window (`ERRORS_DEDUPE_WINDOW_SECONDS`) gate both paths in the client; deduped repeats cost no token. Per-process, like the analytics limiter. The dedupe table is bounded.
+- **Re-entrancy:** records from the `posthog` and `wxyc_fastapi` loggers are ignored, as are records logged on the same thread while a capture is in flight.
+- Frame locals (`capture_exception_code_variables`) are off.
+
 ## Testing helpers
 
 `wxyc_fastapi.testing` (v1.4.0) ships `CountingPosthog` — an in-memory client stand-in that records every `capture` as a `CapturedEvent(event, distinct_id, properties)` and no-ops `flush`/`shutdown` — and `capture_budget(max_events, client=None)`, a context manager that yields a `CountingPosthog` and fails the test with the captured event names when the block records more than `max_events`. Budget the hot paths in consumer suites: one lookup/request should emit at most one summary event, and a bulk job over N items should emit O(1) events per run, not O(N). The helpers need no `posthog` install, so they work in suites that stub the client everywhere.

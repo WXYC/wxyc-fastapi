@@ -2,6 +2,7 @@
 
 import pytest
 
+import wxyc_fastapi.observability.errors as errors_module
 import wxyc_fastapi.observability.posthog as ph_module
 
 
@@ -16,6 +17,8 @@ def _reset_posthog_state():
     """
     ph_module._client = None
     ph_module._warned_prefixes.clear()
+    errors_module._client = None
     yield
     ph_module._client = None
     ph_module._warned_prefixes.clear()
+    errors_module._client = None
