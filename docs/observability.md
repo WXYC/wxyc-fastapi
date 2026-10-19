@@ -39,7 +39,7 @@ Dropped captures batch into at most one `telemetry_rate_limited` event per minut
 - **One event per unhandled exception:** Starlette re-raises after the handler runs and uvicorn then logs "Exception in ASGI application" at ERROR with `exc_info`. The handler marks the exception (`mark_reported`) and `PosthogErrorsHandler` skips marked exceptions.
 - **Environment:** normalized to `production`, `staging` or `development` (`prod`, `stage`, `dev`, `local` are aliases, case and whitespace insensitive); an unknown value passes through with one warning.
 - **Shims:** `capture_exception(err, context, context_name=)` reports through the same client with `context` as the `context_name` property (no-op before init). `add_breadcrumb(category=, message=)` tags the current `posthog.contexts` context with `breadcrumb.<category>`; with no active `new_context()` it is dropped, and `data` / `level` are not recorded.
-- **Not yet stamped:** `request_id` (contract section 3) needs a request-context source this package does not have; `repo`, `tool` and `run_id` are ETL properties.
+- **Request id and mechanisms:** with `app=`, `RequestIdMiddleware` reads a valid `X-Request-ID` (1-128 of `[A-Za-z0-9._-]`) or generates one, echoes it, and events in the request carry `request_id`. Crashes (excepthooks, route 500s) are sent with `mechanism.handled = false` (SDK 7.65.0+). Every capture path marks the exception once admitted and skips marked ones, so one failure is one event. Not stamped: `repo`, `tool` and `run_id` are ETL properties.
 - `init_sentry` is untouched, so both can run during a parity window.
 
 ## Testing helpers
