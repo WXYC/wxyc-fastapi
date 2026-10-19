@@ -302,13 +302,14 @@ def _sdk_omits_exception_level() -> bool:
 
 
 def _safe_str(exc: BaseException) -> str:
-    """``str(exc)``, falling back to ``repr`` then the type name when either raises."""
-    for render in (str, repr):
+    """``str(exc)``, else ``repr``, else the type name, when a hostile dunder raises."""
+    try:
+        return str(exc)
+    except Exception:
         try:
-            return render(exc)
-        except Exception:  # noqa: S112  a hostile __str__/__repr__ must not break capture
-            continue
-    return type(exc).__name__
+            return repr(exc)
+        except Exception:
+            return type(exc).__name__
 
 
 def is_reported(exc: BaseException | None) -> bool:
