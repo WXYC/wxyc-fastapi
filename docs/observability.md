@@ -30,7 +30,7 @@ Dropped captures batch into at most one `telemetry_rate_limited` event per minut
 - **Fail-open and first-call-wins:** the client swallows a raising SDK call (logged at WARNING). `daily_ceiling` has no default. A second `get_posthog_errors_client` call with a different `service`, `environment` or `daily_ceiling` gets the existing client and one warning.
 - **Backstop:** a same-fingerprint dedupe window (`ERRORS_DEDUPE_WINDOW_SECONDS`, 60 s) and then one token bucket (`ERRORS_BURST` = 20 capacity, refilled at `daily_ceiling / 86400` tokens per second) gate both paths in the client; deduped repeats cost no token. Per-process, like the analytics limiter. The dedupe table is bounded. Dropped records are counted and logged as one WARNING at most once a minute.
 - **Re-entrancy:** records from the `posthog` and `wxyc_fastapi.observability` logger trees are ignored (other package loggers such as `wxyc_fastapi.healthcheck` are reported), as are records logged on the same thread while a capture is in flight.
-- Frame locals (`capture_exception_code_variables`, posthog>=6.9) are off.
+- Frame locals (`capture_exception_code_variables`, posthog>=7.65.0) are off.
 
 ## init_error_tracking
 
