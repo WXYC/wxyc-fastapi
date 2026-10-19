@@ -3,11 +3,14 @@
 Singleton and warn-once state reset lives in this directory's conftest.py.
 """
 
+import asyncio
 import logging
+import re
 import sys
 import threading
 from unittest.mock import patch
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -283,3 +286,217 @@ class TestAddBreadcrumbShim:
         with patch("wxyc_fastapi.observability.sentry.sentry_sdk") as sentry:
             add_breadcrumb(category="discogs", message="m")
         sentry.add_breadcrumb.assert_not_called()
+
+
+def _routes(app: FastAPI) -> FastAPI:
+    @app.get("/log-then-raise")
+    async def log_then_raise():
+        try:
+            raise ValueError("logged")
+        except ValueError:
+            logging.getLogger("svc.route").exception("lookup failed")
+            raise
+
+    @app.get("/capture-then-raise")
+    async def capture_then_raise():
+        try:
+            raise ValueError("captured")
+        except ValueError as err:
+            capture_exception(err, {"k": 1})
+            raise
+
+    return app
+
+
+class TestExactlyOnce:
+    @pytest.mark.parametrize("path", ["/boom", "/log-then-raise", "/capture-then-raise"])
+    def test_one_event_per_unhandled_route_exception(self, inner, path):
+        app = _routes(_app())
+        _init(app=app)
+        client = TestClient(app, raise_server_exceptions=False)
+        client.get(path)
+        assert inner.capture_exception.call_count == 1
+
+    def test_dedupe_dropped_capture_does_not_mark_the_exception(self, inner):
+        client = _init(app=_app())
+        first, second = ValueError("same"), ValueError("same")
+        for err in (first, second):
+            client.capture_exception(
+                (ValueError, err, None), logger_name="a", template="t", dedupe_on_message=True
+            )
+        assert inner.capture_exception.call_count == 1
+        assert getattr(second, "_wxyc_error_reported", False) is False
+        assert getattr(first, "_wxyc_error_reported", False) is True
+
+
+class TestRequestId:
+    @pytest.fixture
+    def app(self, inner):
+        app = _routes(_app())
+        _init(app=app)
+        return app
+
+    def _event_request_id(self, inner):
+        return inner.capture_exception.call_args.kwargs["properties"].get("request_id")
+
+    @pytest.mark.parametrize("path", ["/boom", "/log-then-raise", "/capture-then-raise"])
+    def test_valid_header_passes_through_and_is_stamped(self, inner, app, path):
+        response = TestClient(app, raise_server_exceptions=False).get(
+            path, headers={"X-Request-ID": "abc-123_4.5"}
+        )
+        assert self._event_request_id(inner) == "abc-123_4.5"
+        if path != "/boom":
+            return
+        assert response.status_code == 500
+
+    def test_header_is_echoed_on_the_response(self, app):
+        @app.get("/ok")
+        async def ok():
+            return {}
+
+        response = TestClient(app).get("/ok", headers={"X-Request-ID": "abc"})
+        assert response.headers["X-Request-ID"] == "abc"
+
+    def test_missing_header_gets_a_generated_id(self, app):
+        @app.get("/ok")
+        async def ok():
+            return {}
+
+        response = TestClient(app).get("/ok")
+        assert re.fullmatch(r"[0-9a-f]{32}", response.headers["X-Request-ID"])
+
+    @pytest.mark.parametrize("bad", ["a b", "x" * 129, "a/b", "<script>"])
+    def test_invalid_header_is_replaced(self, inner, app, bad):
+        TestClient(app, raise_server_exceptions=False).get("/boom", headers={"X-Request-ID": bad})
+        assert re.fullmatch(r"[0-9a-f]{32}", self._event_request_id(inner))
+
+    def test_omitted_outside_a_request(self, inner):
+        client = _init()
+        try:
+            raise ValueError("x")
+        except ValueError:
+            client.capture_exception(sys.exc_info(), logger_name="a", template="t")
+        client.capture_message(logger_name="a", template="t", message="m")
+        assert "request_id" not in inner.capture_exception.call_args.kwargs["properties"]
+        assert "request_id" not in inner.capture.call_args.kwargs["properties"]
+
+
+class TestMechanismAndProperties:
+    def _raise_into(self, hook):
+        try:
+            raise ValueError("crash")
+        except ValueError:
+            hook(*sys.exc_info())
+
+    def _metadata(self, inner):
+        return inner.capture_exception.call_args.kwargs.get("_capture_metadata")
+
+    def test_process_excepthook_is_unhandled(self, inner):
+        _init()
+        self._raise_into(sys.excepthook)
+        assert self._metadata(inner)["mechanism"] == {"type": "excepthook", "handled": False}
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_thread_excepthook_is_unhandled(self, inner):
+        _init()
+
+        def work():
+            raise ValueError("in thread")
+
+        thread = threading.Thread(target=work)
+        thread.start()
+        thread.join()
+        assert self._metadata(inner)["mechanism"] == {
+            "type": "threading.excepthook",
+            "handled": False,
+        }
+
+    def test_route_handler_is_unhandled_starlette(self, inner):
+        app = _app()
+        _init(app=app)
+        TestClient(app, raise_server_exceptions=False).get("/boom")
+        assert self._metadata(inner)["mechanism"] == {"type": "starlette", "handled": False}
+        assert inner.capture_exception.call_args.kwargs["properties"]["logger"] == "fastapi"
+
+    def test_old_sdk_gets_no_capture_metadata(self, inner):
+        with patch("posthog.version.VERSION", "7.64.0"):
+            _init()
+        self._raise_into(sys.excepthook)
+        assert "_capture_metadata" not in inner.capture_exception.call_args.kwargs
+
+    def test_shim_and_log_events_carry_the_logger_name(self, inner):
+        _init()
+        capture_exception(ValueError("a"))
+        assert (
+            inner.capture_exception.call_args.kwargs["properties"]["logger"] == "capture_exception"
+        )
+        try:
+            raise ValueError("b")
+        except ValueError:
+            logging.getLogger("svc.x").exception("failed")
+        assert inner.capture_exception.call_args.kwargs["properties"]["logger"] == "svc.x"
+
+
+class TestDedupeKeys:
+    def test_same_type_different_messages_are_both_reported(self, inner):
+        _init()
+        capture_exception(ValueError("one"))
+        capture_exception(ValueError("two"))
+        assert inner.capture_exception.call_count == 2
+
+    def test_same_type_and_message_is_deduped(self, inner):
+        _init()
+        capture_exception(ValueError("one"))
+        capture_exception(ValueError("one"))
+        assert inner.capture_exception.call_count == 1
+
+    def test_the_message_is_truncated_in_the_key(self, inner):
+        client = _init()
+        capture_exception(ValueError("x" * 500))
+        assert all(len(k) < 300 for k in client._seen)
+
+
+class TestBreadcrumbIsolation:
+    def test_tag_reaches_the_event_and_stays_in_its_request(self, monkeypatch):
+        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
+        events: list[dict] = []
+
+        def keep(event):
+            events.append(event)
+            return None  # drop: nothing leaves the process
+
+        app = FastAPI()
+        gate = {"a": asyncio.Event(), "b": asyncio.Event()}
+
+        @app.get("/{name}")
+        async def route(name: str):
+            with contexts.new_context():
+                add_breadcrumb(category="step", message=f"crumb-{name}")
+                gate[name].set()
+                await asyncio.wait_for(gate["a"].wait(), 5)
+                await asyncio.wait_for(gate["b"].wait(), 5)
+                capture_exception(ValueError(name))
+            return {}
+
+        async def run():
+            _init(app=app, before_send=keep)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                await asyncio.gather(c.get("/a"), c.get("/b"))
+
+        try:
+            asyncio.run(run())
+        finally:
+            for handler in [
+                h for h in logging.getLogger().handlers if isinstance(h, PosthogErrorsHandler)
+            ]:
+                logging.getLogger().removeHandler(handler)
+            from wxyc_fastapi.observability import shutdown_posthog_errors
+
+            shutdown_posthog_errors()
+            et_module._hooks_installed = False
+        by_value = {e["properties"]["$exception_list"][0]["value"]: e for e in events}
+        assert set(by_value) == {"a", "b"}
+        for name, event in by_value.items():
+            tags = {k: v for k, v in event["properties"].items() if k.startswith("breadcrumb.")}
+            assert tags == {"breadcrumb.step": f"crumb-{name}"}

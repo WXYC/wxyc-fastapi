@@ -19,12 +19,10 @@ an event carrying a list is dropped at ingestion.
 
 Every event carries ``service``, ``environment`` and ``$process_person_profile:
 false`` (plus ``release`` when known), and ``distinct_id`` is the service name.
-A send that raises is swallowed (fail-open) inside the client, so callers other
-than the logging handler (the FastAPI handler, the ``capture_exception`` shim)
-never see an SDK error. ``daily_ceiling`` has no default: the contract's sizes
-differ per service. The first ``get_posthog_errors_client`` call wins; a later
-call with different ``service``, ``environment`` or ``daily_ceiling`` logs one
-warning that its values are ignored.
+A send that raises is swallowed (fail-open), so no caller sees an SDK error.
+``daily_ceiling`` has no default: the contract's sizes differ per service. The first
+``get_posthog_errors_client`` call wins; a later call with different values logs one
+warning that they are ignored.
 
 PostHog's free plan caps exceptions at 100K/month, so the client gates both
 paths behind a same-fingerprint dedupe window (``ERRORS_DEDUPE_WINDOW_SECONDS``)
@@ -35,6 +33,7 @@ per-process circuit breaker, not a budget enforcer: N workers admit N× the rate
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -67,9 +66,13 @@ _SELF_LOGGER_TREES = ("posthog", "wxyc_fastapi.observability")
 _SECONDS_PER_DAY = 86400.0
 # posthog-python 7.65.0 sets ``$exception_level`` itself and warns on an override.
 _SDK_SETS_LEVEL_FROM = (7, 65, 0)
-# Set on an exception once the FastAPI handler has reported it, so the server's
-# own ERROR log of the same re-raised exception is not reported a second time.
+# Set on an exception once a capture of it was admitted and issued, on any path.
 _REPORTED_ATTR = "_wxyc_error_reported"
+
+# The current request's id, set by the request-id middleware.
+request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "wxyc_request_id", default=None
+)
 
 _client: PosthogErrorsClient | None = None
 _config: tuple[str, str, float] | None = None
@@ -125,18 +128,40 @@ class PosthogErrorsClient:
         logger_name: str,
         template: str,
         properties: dict[str, Any] | None = None,
+        mechanism: dict[str, Any] | None = None,
+        dedupe_on_message: bool = False,
     ) -> None:
-        """Report an exception via the SDK's ``capture_exception``; never raises."""
-        if self._admit(":".join((logger_name, template, exc_info[0].__name__))):
-            merged = {**(properties or {}), **self._base_properties}
+        """Report an exception via the SDK; never raises. A marked exception is skipped.
+
+        The mark is set only after the gate admits the capture. ``dedupe_on_message``
+        keys the dedupe on ``type:message``; ``mechanism`` needs SDK 7.65.0+.
+        """
+        exc = exc_info[1]
+        if is_reported(exc):
+            return
+        name = exc_info[0].__name__
+        detail = f"{name}:{exc}"[:200] if dedupe_on_message else name
+        if self._admit(f"{logger_name}:{template}:{detail}"):
+            merged = {**(properties or {}), "logger": logger_name, **self._event_properties()}
             if self._sdk_omits_level:
                 merged["$exception_level"] = "error"
+            extra = (
+                {}
+                if mechanism is None or self._sdk_omits_level
+                else {"_capture_metadata": {"mechanism": mechanism}}
+            )
             self._send(
                 self._inner.capture_exception,
                 exc_info,
                 distinct_id=self._service,
                 properties=merged,
+                **extra,
             )
+            mark_reported(exc)
+
+    def _event_properties(self) -> dict[str, Any]:
+        request_id = request_id_var.get()
+        return {**self._base_properties, **({"request_id": request_id} if request_id else {})}
 
     def capture_message(self, *, logger_name: str, template: str, message: str) -> None:
         """Report a message-only record as a synthesized ``$exception`` event."""
@@ -147,7 +172,7 @@ class PosthogErrorsClient:
                 event="$exception",
                 distinct_id=self._service,
                 properties={
-                    **self._base_properties,
+                    **self._event_properties(),
                     "$exception_list": [
                         {
                             "type": "Message",
@@ -246,8 +271,6 @@ class PosthogErrorsHandler(logging.Handler):
         try:
             template = str(record.msg)
             if record.exc_info and record.exc_info[0] is not None:
-                if is_reported(record.exc_info[1]):
-                    return
                 self._errors_client.capture_exception(
                     record.exc_info, logger_name=record.name, template=template
                 )
@@ -266,11 +289,7 @@ def _is_self_logger(name: str) -> bool:
 
 
 def _sdk_omits_exception_level() -> bool:
-    """True unless the installed ``posthog`` is known to set ``$exception_level`` itself.
-
-    An unreadable or unparseable version counts as unknown, so the level is set;
-    pre-release suffixes (``7.65.0rc1``) are read by their leading integers.
-    """
+    """True unless the installed ``posthog`` is known (7.65.0+) to set ``$exception_level``."""
     try:
         from posthog.version import VERSION  # noqa: PLC0415
 
@@ -281,12 +300,12 @@ def _sdk_omits_exception_level() -> bool:
 
 
 def is_reported(exc: BaseException | None) -> bool:
-    """True once the FastAPI handler has reported ``exc`` (see ``_REPORTED_ATTR``)."""
+    """True once a capture of ``exc`` was admitted and issued."""
     return getattr(exc, _REPORTED_ATTR, False)
 
 
-def mark_reported(exc: BaseException) -> None:
-    """Mark ``exc`` as reported so ``PosthogErrorsHandler`` skips its ERROR log."""
+def mark_reported(exc: BaseException | None) -> None:
+    """Mark ``exc`` as reported so every capture path skips it."""
     try:
         setattr(exc, _REPORTED_ATTR, True)
     except Exception:  # noqa: S110  an exception type refusing attributes is just re-reported
@@ -309,12 +328,10 @@ def get_posthog_errors_client(
     """Return the singleton errors client, or ``None`` when it cannot be built.
 
     ``None`` means ``POSTHOG_ERRORS_API_KEY`` is unset, or the ``posthog`` import or
-    constructor failed (one warning, then the failure is cached and not retried).
-    ``service`` is the event ``distinct_id``; ``environment`` is ``production``,
-    ``staging`` or ``development``; ``daily_ceiling`` sets the bucket refill rate.
-    ``release`` is stamped on every event when given; ``before_send`` is forwarded
-    to the SDK. The first call wins: a later call with a different ``service``,
-    ``environment`` or ``daily_ceiling`` gets the existing client and one warning.
+    constructor failed (one warning, cached). ``service`` is the ``distinct_id``;
+    ``daily_ceiling`` sets the bucket refill rate; ``release`` is stamped on events;
+    ``before_send`` goes to the SDK. The first call wins; a differing later call
+    gets the existing client and one warning.
     """
     global _client, _config, _init_failed
     with _lock:
