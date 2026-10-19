@@ -140,7 +140,7 @@ class PosthogErrorsClient:
         if is_reported(exc):
             return
         name = exc_info[0].__name__
-        detail = f"{name}:{exc}"[:200] if dedupe_on_message else name
+        detail = f"{name}:{_safe_str(exc)}"[:200] if dedupe_on_message else name
         if self._admit(f"{logger_name}:{template}:{detail}"):
             merged = {**(properties or {}), "logger": logger_name, **self._event_properties()}
             if self._sdk_omits_level:
@@ -157,6 +157,8 @@ class PosthogErrorsClient:
                 properties=merged,
                 **extra,
             )
+            # Not marked when dedupe suppresses it: the handler's unhandled event must still
+            # send (matches wxyc-etl#162); the token bucket bounds the repeat.
             mark_reported(exc)
 
     def _event_properties(self) -> dict[str, Any]:
@@ -297,6 +299,16 @@ def _sdk_omits_exception_level() -> bool:
         return match is None or tuple(map(int, match.groups())) < _SDK_SETS_LEVEL_FROM
     except Exception:
         return True
+
+
+def _safe_str(exc: BaseException) -> str:
+    """``str(exc)``, falling back to ``repr`` then the type name when either raises."""
+    for render in (str, repr):
+        try:
+            return render(exc)
+        except Exception:  # noqa: S112  a hostile __str__/__repr__ must not break capture
+            continue
+    return type(exc).__name__
 
 
 def is_reported(exc: BaseException | None) -> bool:
