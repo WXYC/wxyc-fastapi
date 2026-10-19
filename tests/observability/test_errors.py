@@ -45,12 +45,14 @@ def _record(
 def _client(inner: MagicMock, clock: FakeClock | None = None, **kwargs) -> PosthogErrorsClient:
     kwargs.setdefault("service", "svc")
     kwargs.setdefault("environment", "production")
+    kwargs.setdefault("daily_ceiling", 300)
     return PosthogErrorsClient(inner, clock=clock or FakeClock(), **kwargs)
 
 
 def _get(**kwargs):
     kwargs.setdefault("service", "svc")
     kwargs.setdefault("environment", "production")
+    kwargs.setdefault("daily_ceiling", 300)
     return get_posthog_errors_client(**kwargs)
 
 

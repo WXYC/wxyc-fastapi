@@ -8,6 +8,7 @@ from wxyc_fastapi.observability.cache_stats import (
     timed_api,
     timed_pg,
 )
+from wxyc_fastapi.observability.error_tracking import init_error_tracking
 from wxyc_fastapi.observability.errors import (
     PosthogErrorsClient,
     PosthogErrorsHandler,
@@ -43,6 +44,7 @@ __all__ = [
     "get_posthog_client",
     "get_posthog_errors_client",
     "init_cache_stats",
+    "init_error_tracking",
     "init_sentry",
     "shutdown_posthog",
     "shutdown_posthog_errors",

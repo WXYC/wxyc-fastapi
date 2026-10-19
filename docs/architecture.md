@@ -27,6 +27,7 @@ tests/
 ├── observability/
 │   ├── test_cache_stats.py  # PR 1
 │   ├── test_sentry.py       # PR 2
+│   ├── test_error_tracking.py  # v1.6.0
 │   ├── test_posthog.py      # PR 2
 │   ├── test_posthog_ratelimit.py  # v1.4.0
 │   └── test_telemetry.py    # PR 3
@@ -93,6 +94,7 @@ The shared modules are parameterized so each consumer can keep its existing taxo
 | 1.2.0 | — | `as_server_timing(descriptions=...)` — per-leg `desc="..."` annotation for derived/overlapping legs, sanitized against header injection (additive; see [`observability.md`](observability.md#telemetry)) |
 | 1.3.0 | — | `RequestTelemetry(emit_step_events=False)` — suppress unconsumed per-step PostHog events, summary-only (additive; see [`observability.md`](observability.md#telemetry)) |
 | 1.4.0 | — | PostHog capture rate limiter (token-bucket proxy from `get_posthog_client`, `telemetry_rate_limited` drop reports) + `wxyc_fastapi.testing` capture-budget helpers (see [`observability.md`](observability.md#posthog-wrapper)) |
+| 1.6.0 | — | `init_error_tracking(...)` (PostHog error tracking: FastAPI handler, exception autocapture, `before_send`) + `capture_exception` / `add_breadcrumb` shims re-routed to PostHog; `daily_ceiling` required (see [`observability.md`](observability.md#init_error_tracking)) |
 
 The package follows SemVer. Now that 1.0 is cut, consumers pin the major range `wxyc-fastapi>=1.x,<2` (e.g. a consumer that calls a method added in 1.1.0 pins `>=1.1.0,<2.0.0`); a breaking change bumps to 2.0.0.
 
