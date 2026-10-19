@@ -5,11 +5,7 @@ from unittest.mock import patch
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.httpx import HttpxIntegration
 
-from wxyc_fastapi.observability.sentry import (
-    add_breadcrumb,
-    capture_exception,
-    init_sentry,
-)
+from wxyc_fastapi.observability.sentry import init_sentry
 
 
 class TestInitSentry:
@@ -145,52 +141,3 @@ class TestInitSentry:
         kwargs = mock_init.call_args.kwargs
         assert kwargs["traces_sample_rate"] == 1.0
         assert kwargs["sample_rate"] == 1.0
-
-
-class TestAddBreadcrumb:
-    def test_passes_category_and_message(self):
-        with patch("wxyc_fastapi.observability.sentry.sentry_sdk.add_breadcrumb") as mock_bc:
-            add_breadcrumb(category="discogs", message="search_releases", data={"q": "stereolab"})
-        mock_bc.assert_called_once_with(
-            category="discogs",
-            message="search_releases",
-            data={"q": "stereolab"},
-            level="info",
-        )
-
-    def test_data_defaults_to_empty_dict(self):
-        with patch("wxyc_fastapi.observability.sentry.sentry_sdk.add_breadcrumb") as mock_bc:
-            add_breadcrumb(category="groq", message="parse")
-        assert mock_bc.call_args.kwargs["data"] == {}
-
-    def test_level_passes_through(self):
-        with patch("wxyc_fastapi.observability.sentry.sentry_sdk.add_breadcrumb") as mock_bc:
-            add_breadcrumb(category="slack", message="post", level="warning")
-        assert mock_bc.call_args.kwargs["level"] == "warning"
-
-
-class TestCaptureException:
-    def test_captures_exception(self):
-        err = ValueError("boom")
-        with patch("wxyc_fastapi.observability.sentry.sentry_sdk.capture_exception") as mock_cap:
-            capture_exception(err)
-        mock_cap.assert_called_once_with(err)
-
-    def test_attaches_context_when_provided(self):
-        err = ValueError("boom")
-        with (
-            patch("wxyc_fastapi.observability.sentry.sentry_sdk.set_context") as mock_ctx,
-            patch("wxyc_fastapi.observability.sentry.sentry_sdk.capture_exception"),
-        ):
-            capture_exception(err, context={"q": "stereolab"}, context_name="discogs")
-        mock_ctx.assert_called_once_with("discogs", {"q": "stereolab"})
-
-    def test_default_context_name(self):
-        err = ValueError("boom")
-        with (
-            patch("wxyc_fastapi.observability.sentry.sentry_sdk.set_context") as mock_ctx,
-            patch("wxyc_fastapi.observability.sentry.sentry_sdk.capture_exception"),
-        ):
-            capture_exception(err, context={"k": "v"})
-        # Default context name is "request" — generic, consumer-agnostic.
-        mock_ctx.assert_called_once_with("request", {"k": "v"})

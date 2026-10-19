@@ -11,8 +11,9 @@ baked in:
 3. The default ``environment`` is ``"local"`` (not ``"production"``) so a stray
    init without arguments does not pollute the production stream.
 
-``add_breadcrumb`` is a category-keyed wrapper around ``sentry_sdk.add_breadcrumb``;
-``capture_exception`` optionally attaches a named context dict before sending.
+``add_breadcrumb`` and ``capture_exception`` are shims that report through the PostHog
+errors client (see ``error_tracking.py``), not Sentry; they are no-ops until
+``init_error_tracking`` has run.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ import sentry_sdk
 from sentry_sdk.integrations import Integration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.httpx import HttpxIntegration
+
+from wxyc_fastapi.observability.errors import get_current_errors_client
 
 if TYPE_CHECKING:
     from sentry_sdk.types import Event, Hint
@@ -114,24 +117,20 @@ def add_breadcrumb(
     data: dict[str, Any] | None = None,
     level: str = "info",
 ) -> None:
-    """Add a Sentry breadcrumb keyed by ``category``.
+    """Record ``message`` as a ``breadcrumb.<category>`` tag on the current PostHog context.
 
     The category kwarg is required so each consumer keeps its own taxonomy
-    (``"discogs"``, ``"groq"``, ``"slack"``, ...).
-
-    Args:
-        category: Breadcrumb category (consumer-defined namespace).
-        message: Short description of the operation.
-        data: Optional contextual data dict.
-        level: Sentry severity (``"debug"``, ``"info"``, ``"warning"``,
-            ``"error"``, ``"critical"``).
+    (``"discogs"``, ``"groq"``, ``"slack"``, ...). The tag rides on any event
+    captured inside the active ``posthog.contexts.new_context()``; with no active
+    context, or without the ``posthog`` extra, the breadcrumb is dropped. ``data``
+    and ``level`` are accepted for call-site compatibility but not recorded: tags
+    are flat, and a repeated category keeps its latest message.
     """
-    sentry_sdk.add_breadcrumb(
-        category=category,
-        message=message,
-        data=data or {},
-        level=level,
-    )
+    try:
+        from posthog import contexts  # noqa: PLC0415  lazy: optional ``posthog`` extra
+    except ImportError:
+        return
+    contexts.tag(f"breadcrumb.{category}", message)
 
 
 def capture_exception(
@@ -140,14 +139,19 @@ def capture_exception(
     *,
     context_name: str = "request",
 ) -> None:
-    """Capture an exception, optionally attaching a named context dict first.
+    """Report an exception through the PostHog errors client, if ``init_error_tracking`` ran.
 
     Args:
         error: Exception to send.
-        context: Optional contextual data attached as a Sentry context.
-        context_name: Sentry context key under which ``context`` is stored.
+        context: Optional contextual data attached as the ``context_name`` event property.
+        context_name: Property key under which ``context`` is stored.
             Defaults to ``"request"``.
     """
-    if context:
-        sentry_sdk.set_context(context_name, context)
-    sentry_sdk.capture_exception(error)
+    client = get_current_errors_client()
+    if client is not None:
+        client.capture_exception(
+            (type(error), error, error.__traceback__),
+            logger_name="capture_exception",
+            template=context_name,
+            properties={context_name: context} if context else None,
+        )

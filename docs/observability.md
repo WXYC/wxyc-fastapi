@@ -26,10 +26,21 @@ Dropped captures batch into at most one `telemetry_rate_limited` event per minut
 
 - **With `exc_info`:** forwarded to the SDK's `capture_exception`.
 - **Without it:** the SDK's `capture_exception` returns nothing when no exception is active, so the client sends a synthesized `$exception` event instead — `$exception_list` holds one entry (type = `Message`, value = `record.getMessage()`, `mechanism = {type: "generic", handled: true, synthetic: true}`), a `logger` property (`record.name`), `$exception_level: "error"`, and `$exception_fingerprint = f"{record.name}:{record.msg}"` — one string, because PostHog types the field `Option<String>` and drops an event that sends a list. The unformatted template groups by call site. Limitation: a call site that pre-formats its message (`logger.error(f"failed for {name}")`) has a different template per value, so it neither groups nor dedupes; use `%s` arguments.
-- **Identity:** every event carries `service`, `environment` and `$process_person_profile: false`; `distinct_id` is `service`. On the exception path `$exception_level: "error"` is set only when `posthog` < 7.65.0 (the SDK sets it itself from then on).
+- **Identity:** every event carries `service`, `environment` and `$process_person_profile: false` (plus `release` when given); `distinct_id` is `service`. On the exception path `$exception_level: "error"` is set unless `posthog` is known to be >= 7.65.0 (the SDK sets it itself from then on), so an unreadable version sets it.
+- **Fail-open and first-call-wins:** the client swallows a raising SDK call (logged at WARNING). `daily_ceiling` has no default. A second `get_posthog_errors_client` call with a different `service`, `environment` or `daily_ceiling` gets the existing client and one warning.
 - **Backstop:** a same-fingerprint dedupe window (`ERRORS_DEDUPE_WINDOW_SECONDS`, 60 s) and then one token bucket (`ERRORS_BURST` = 20 capacity, refilled at `daily_ceiling / 86400` tokens per second) gate both paths in the client; deduped repeats cost no token. Per-process, like the analytics limiter. The dedupe table is bounded. Dropped records are counted and logged as one WARNING at most once a minute.
 - **Re-entrancy:** records from the `posthog` and `wxyc_fastapi.observability` logger trees are ignored (other package loggers such as `wxyc_fastapi.healthcheck` are reported), as are records logged on the same thread while a capture is in flight.
 - Frame locals (`capture_exception_code_variables`, posthog>=6.9) are off.
+
+## init_error_tracking
+
+`init_error_tracking(service=..., environment=..., daily_ceiling=..., release=None, before_send=None, app=None)` (`observability/error_tracking.py`) is the one call that replaces `init_sentry`'s error path; it returns the client, or `None` when `POSTHOG_ERRORS_API_KEY` is unset. It attaches `PosthogErrorsHandler` to the root logger (once), chains `sys.excepthook` and `threading.excepthook` for exception autocapture, and, given `app`, registers an `Exception` handler that returns a plain 500. All three send through the one client, so its dedupe and token bucket cover them; the SDK's own `enable_exception_autocapture` is left off because it would bypass that gate.
+
+- **One event per unhandled exception:** Starlette re-raises after the handler runs and uvicorn then logs "Exception in ASGI application" at ERROR with `exc_info`. The handler marks the exception (`mark_reported`) and `PosthogErrorsHandler` skips marked exceptions.
+- **Environment:** normalized to `production`, `staging` or `development` (`prod`, `stage`, `dev`, `local` are aliases, case and whitespace insensitive); an unknown value passes through with one warning.
+- **Shims:** `capture_exception(err, context, context_name=)` reports through the same client with `context` as the `context_name` property (no-op before init). `add_breadcrumb(category=, message=)` tags the current `posthog.contexts` context with `breadcrumb.<category>`; with no active `new_context()` it is dropped, and `data` / `level` are not recorded.
+- **Not yet stamped:** `request_id` (contract section 3) needs a request-context source this package does not have; `repo`, `tool` and `run_id` are ETL properties.
+- `init_sentry` is untouched, so both can run during a parity window.
 
 ## Testing helpers
 

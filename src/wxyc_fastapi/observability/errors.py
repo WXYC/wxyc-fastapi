@@ -18,7 +18,13 @@ than by interpolated values. PostHog types the fingerprint as a single string;
 an event carrying a list is dropped at ingestion.
 
 Every event carries ``service``, ``environment`` and ``$process_person_profile:
-false``, and ``distinct_id`` is the service name.
+false`` (plus ``release`` when known), and ``distinct_id`` is the service name.
+A send that raises is swallowed (fail-open) inside the client, so callers other
+than the logging handler (the FastAPI handler, the ``capture_exception`` shim)
+never see an SDK error. ``daily_ceiling`` has no default: the contract's sizes
+differ per service. The first ``get_posthog_errors_client`` call wins; a later
+call with different ``service``, ``environment`` or ``daily_ceiling`` logs one
+warning that its values are ignored.
 
 PostHog's free plan caps exceptions at 100K/month, so the client gates both
 paths behind a same-fingerprint dedupe window (``ERRORS_DEDUPE_WINDOW_SECONDS``)
@@ -49,7 +55,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ERRORS_BURST = 20.0
-ERRORS_DAILY_CEILING = 300.0
 ERRORS_DEDUPE_WINDOW_SECONDS = 60.0
 
 _MAX_TRACKED_FINGERPRINTS = 1000
@@ -62,8 +67,13 @@ _SELF_LOGGER_TREES = ("posthog", "wxyc_fastapi.observability")
 _SECONDS_PER_DAY = 86400.0
 # posthog-python 7.65.0 sets ``$exception_level`` itself and warns on an override.
 _SDK_SETS_LEVEL_FROM = (7, 65, 0)
+# Set on an exception once the FastAPI handler has reported it, so the server's
+# own ERROR log of the same re-raised exception is not reported a second time.
+_REPORTED_ATTR = "_wxyc_error_reported"
 
 _client: PosthogErrorsClient | None = None
+_config: tuple[str, str, float] | None = None
+_warned_conflicts: set[tuple[str, str, float]] = set()
 _init_failed = False
 _lock = threading.Lock()
 
@@ -81,7 +91,8 @@ class PosthogErrorsClient:
         *,
         service: str,
         environment: str,
-        daily_ceiling: float = ERRORS_DAILY_CEILING,
+        daily_ceiling: float,
+        release: str | None = None,
         burst: float = ERRORS_BURST,
         dedupe_window_seconds: float = ERRORS_DEDUPE_WINDOW_SECONDS,
         clock: Callable[[], float] = time.monotonic,
@@ -93,6 +104,8 @@ class PosthogErrorsClient:
             "environment": environment,
             "$process_person_profile": False,
         }
+        if release:
+            self._base_properties["release"] = release
         self._sdk_omits_level = _sdk_omits_exception_level()
         self._rate_per_second = daily_ceiling / _SECONDS_PER_DAY
         self._burst = burst
@@ -105,21 +118,32 @@ class PosthogErrorsClient:
         self._dropped = 0
         self._last_drop_log: float | None = None
 
-    def capture_exception(self, exc_info: ExcInfo, *, logger_name: str, template: str) -> None:
-        """Report a record's active exception via the SDK's ``capture_exception``."""
+    def capture_exception(
+        self,
+        exc_info: ExcInfo,
+        *,
+        logger_name: str,
+        template: str,
+        properties: dict[str, Any] | None = None,
+    ) -> None:
+        """Report an exception via the SDK's ``capture_exception``; never raises."""
         if self._admit(":".join((logger_name, template, exc_info[0].__name__))):
-            properties = dict(self._base_properties)
+            merged = {**(properties or {}), **self._base_properties}
             if self._sdk_omits_level:
-                properties["$exception_level"] = "error"
-            self._inner.capture_exception(
-                exc_info, distinct_id=self._service, properties=properties
+                merged["$exception_level"] = "error"
+            self._send(
+                self._inner.capture_exception,
+                exc_info,
+                distinct_id=self._service,
+                properties=merged,
             )
 
     def capture_message(self, *, logger_name: str, template: str, message: str) -> None:
         """Report a message-only record as a synthesized ``$exception`` event."""
         fingerprint = f"{logger_name}:{template}"
         if self._admit(fingerprint):
-            self._inner.capture(
+            self._send(
+                self._inner.capture,
                 event="$exception",
                 distinct_id=self._service,
                 properties={
@@ -136,6 +160,14 @@ class PosthogErrorsClient:
                     "logger": logger_name,
                 },
             )
+
+    @staticmethod
+    def _send(send: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        """Fail open: a raising SDK call is logged and swallowed, never propagated."""
+        try:
+            send(*args, **kwargs)
+        except Exception:
+            logger.warning("PostHog errors client failed to send; event dropped", exc_info=True)
 
     def flush(self) -> Any:
         """Block until the SDK's queued events are sent."""
@@ -214,6 +246,8 @@ class PosthogErrorsHandler(logging.Handler):
         try:
             template = str(record.msg)
             if record.exc_info and record.exc_info[0] is not None:
+                if is_reported(record.exc_info[1]):
+                    return
                 self._errors_client.capture_exception(
                     record.exc_info, logger_name=record.name, template=template
                 )
@@ -232,18 +266,45 @@ def _is_self_logger(name: str) -> bool:
 
 
 def _sdk_omits_exception_level() -> bool:
-    """True when the installed ``posthog`` predates the release that sets ``$exception_level``."""
+    """True unless the installed ``posthog`` is known to set ``$exception_level`` itself.
+
+    An unreadable or unparseable version counts as unknown, so the level is set;
+    pre-release suffixes (``7.65.0rc1``) are read by their leading integers.
+    """
     try:
         from posthog.version import VERSION  # noqa: PLC0415
 
-        parts = tuple(int(n) for n in re.findall(r"\d+", VERSION)[:3])
-        return parts < _SDK_SETS_LEVEL_FROM
+        match = re.match(r"(\d+)\.(\d+)\.(\d+)", VERSION)
+        return match is None or tuple(map(int, match.groups())) < _SDK_SETS_LEVEL_FROM
     except Exception:
-        return False
+        return True
+
+
+def is_reported(exc: BaseException | None) -> bool:
+    """True once the FastAPI handler has reported ``exc`` (see ``_REPORTED_ATTR``)."""
+    return getattr(exc, _REPORTED_ATTR, False)
+
+
+def mark_reported(exc: BaseException) -> None:
+    """Mark ``exc`` as reported so ``PosthogErrorsHandler`` skips its ERROR log."""
+    try:
+        setattr(exc, _REPORTED_ATTR, True)
+    except Exception:  # noqa: S110  an exception type refusing attributes is just re-reported
+        pass
+
+
+def get_current_errors_client() -> PosthogErrorsClient | None:
+    """Return the already-built singleton without constructing one, or ``None``."""
+    return _client
 
 
 def get_posthog_errors_client(
-    *, service: str, environment: str, daily_ceiling: float = ERRORS_DAILY_CEILING
+    *,
+    service: str,
+    environment: str,
+    daily_ceiling: float,
+    release: str | None = None,
+    before_send: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> PosthogErrorsClient | None:
     """Return the singleton errors client, or ``None`` when it cannot be built.
 
@@ -251,8 +312,11 @@ def get_posthog_errors_client(
     constructor failed (one warning, then the failure is cached and not retried).
     ``service`` is the event ``distinct_id``; ``environment`` is ``production``,
     ``staging`` or ``development``; ``daily_ceiling`` sets the bucket refill rate.
+    ``release`` is stamped on every event when given; ``before_send`` is forwarded
+    to the SDK. The first call wins: a later call with a different ``service``,
+    ``environment`` or ``daily_ceiling`` gets the existing client and one warning.
     """
-    global _client, _init_failed
+    global _client, _config, _init_failed
     with _lock:
         api_key = os.environ.get("POSTHOG_ERRORS_API_KEY")
         if not api_key or _init_failed:
@@ -263,24 +327,44 @@ def get_posthog_errors_client(
 
                 host = os.environ.get("POSTHOG_HOST", _DEFAULT_HOST)
                 _client = PosthogErrorsClient(
-                    Posthog(api_key, host=host, capture_exception_code_variables=False),
+                    Posthog(
+                        api_key,
+                        host=host,
+                        capture_exception_code_variables=False,
+                        before_send=before_send,
+                    ),
                     service=service,
                     environment=environment,
                     daily_ceiling=daily_ceiling,
+                    release=release,
                 )
+                _config = (service, environment, daily_ceiling)
             except Exception:
                 _init_failed = True
                 logger.warning(
                     "PostHog errors client unavailable; error reporting disabled", exc_info=True
                 )
                 return None
+        elif (requested := (service, environment, daily_ceiling)) != _config and (
+            requested not in _warned_conflicts
+        ):
+            _warned_conflicts.add(requested)
+            logger.warning(
+                "PostHog errors client already configured as %s; ignored the later call's service=%r "
+                "environment=%r daily_ceiling=%r",
+                _config,
+                service,
+                environment,
+                daily_ceiling,
+            )
         return _client
 
 
 def shutdown_posthog_errors() -> None:
     """Shut down the errors client and clear the singleton. Safe no-op when uninitialized."""
-    global _client, _init_failed
+    global _client, _config, _init_failed
     _init_failed = False
+    _config = None
     if _client is not None:
         _client.shutdown()
         _client = None
