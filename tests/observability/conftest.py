@@ -18,7 +18,9 @@ def _reset_posthog_state():
     ph_module._client = None
     ph_module._warned_prefixes.clear()
     errors_module._client = None
+    errors_module._init_failed = False
     yield
     ph_module._client = None
     ph_module._warned_prefixes.clear()
     errors_module._client = None
+    errors_module._init_failed = False
