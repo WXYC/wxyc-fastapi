@@ -534,3 +534,72 @@ class TestBreadcrumbIsolation:
         for name, event in by_value.items():
             tags = {k: v for k, v in event["properties"].items() if k.startswith("breadcrumb.")}
             assert tags == {"breadcrumb.step": f"crumb-{name}"}
+
+
+class TestRequestContext:
+    """The middleware opens the posthog context, so routes never have to."""
+
+    def _run(self, monkeypatch, app, paths):
+        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
+        events: list[dict] = []
+
+        def keep(event):
+            events.append(event)
+            return None  # drop: nothing leaves the process
+
+        async def run():
+            _init(app=app, before_send=keep)
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                await asyncio.gather(*(c.get(p, headers={"X-Request-ID": p[1:]}) for p in paths))
+
+        try:
+            asyncio.run(run())
+        finally:
+            for handler in [
+                h for h in logging.getLogger().handlers if isinstance(h, PosthogErrorsHandler)
+            ]:
+                logging.getLogger().removeHandler(handler)
+            from wxyc_fastapi.observability import shutdown_posthog_errors
+
+            shutdown_posthog_errors()
+            et_module._hooks_installed = False
+        return events
+
+    def test_breadcrumb_then_error_log_carries_the_tag(self, monkeypatch):
+        app = FastAPI()
+
+        @app.get("/log")
+        async def route():
+            add_breadcrumb(category="discogs", message="search_releases")
+            logging.getLogger("svc.route").error("lookup failed")
+            return {}
+
+        (event,) = self._run(monkeypatch, app, ["/log"])
+        assert event["properties"]["breadcrumb.discogs"] == "search_releases"
+
+    def test_concurrent_requests_carry_only_their_own_tags(self, monkeypatch):
+        app = FastAPI()
+        gate = {"a": asyncio.Event(), "b": asyncio.Event()}
+
+        @app.get("/{name}")
+        async def route(name: str):
+            add_breadcrumb(category="step", message=f"crumb-{name}")
+            gate[name].set()
+            await asyncio.wait_for(gate["a"].wait(), 5)
+            await asyncio.wait_for(gate["b"].wait(), 5)
+            capture_exception(ValueError(name))
+            return {}
+
+        events = self._run(monkeypatch, app, ["/a", "/b"])
+        by_value = {e["properties"]["$exception_list"][0]["value"]: e for e in events}
+        assert set(by_value) == {"a", "b"}
+        for name, event in by_value.items():
+            props = event["properties"]
+            tags = {k: v for k, v in props.items() if k.startswith("breadcrumb.")}
+            assert tags == {"breadcrumb.step": f"crumb-{name}"}
+            assert props["request_id"] == name
+
+    def test_route_exception_is_sent_once(self, monkeypatch):
+        events = self._run(monkeypatch, _app(), ["/boom"])
+        assert len(events) == 1

@@ -18,6 +18,7 @@ import re
 import sys
 import threading
 import uuid
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from fastapi.responses import PlainTextResponse
@@ -32,6 +33,7 @@ from wxyc_fastapi.observability.errors import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from fastapi import FastAPI, Request
 
@@ -135,9 +137,21 @@ class RequestIdMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, receive, send_with_id)
+            with _request_context():
+                await self.app(scope, receive, send_with_id)
         finally:
             request_id_var.reset(token)
+
+
+def _request_context() -> AbstractContextManager[Any]:
+    """A fresh posthog context so ``add_breadcrumb`` / ``contexts.tag`` land on this request's events."""
+    try:
+        from posthog import contexts  # noqa: PLC0415  lazy: optional ``posthog`` extra
+    except ImportError:
+        return nullcontext()
+    # capture_exceptions=False: the SDK would otherwise capture every exception itself,
+    # bypassing the client's dedupe window and token bucket, and send it twice.
+    return contexts.new_context(fresh=True, capture_exceptions=False)
 
 
 def _unhandled_exception_handler(client: PosthogErrorsClient):
