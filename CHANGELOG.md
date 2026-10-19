@@ -17,10 +17,10 @@ All notable changes to this project will be documented in this file. Format foll
 - `PosthogErrorsClient.capture_exception` / `capture_message` swallow SDK errors (logged at WARNING) so callers other than the logging handler never see them.
 - `get_posthog_errors_client` is first-call-wins: a later call with a different `service`, `environment` or `daily_ceiling` logs one warning that its values are ignored.
 - An unreadable or unparseable `posthog` version now sets `$exception_level` (it used to skip it), and pre-release versions (`7.65.0rc1`) are read by their leading integers.
-- The `posthog` extra's floor rises from `>=3.0` to `>=6.9`, the first release with the `capture_exception_code_variables` constructor argument the errors client passes (posthog-python 6.9.0, 2025-11-06).
+- The `posthog` extra's floor rises from `>=3.0` to `>=7.65.0` (the `dev` extra moves with it): 7.65.0 is the first release that sets `$exception_level` itself and honors the `handled: false` mechanism the excepthook and Starlette crash paths send, so those crashes are no longer reported as handled. The pre-7.65 fallback branches in `errors.py` stay as a defensive path for an unreadable SDK version.
 
 ### Consumer impact
-- A consumer that calls `capture_exception` / `add_breadcrumb` and has not called `init_error_tracking` stops reporting to Sentry through those shims and reports nothing until it does; call `init_error_tracking` (alongside `init_sentry` during a parity window) before upgrading. A direct caller of `get_posthog_errors_client` or `PosthogErrorsClient` must now pass `daily_ceiling`. A consumer pinning `posthog<6.9` must raise its pin to install the `[posthog]` extra (the known consumers pin 7.x). Not tagged in this change: publishing is a separate step that tags the merge commit.
+- A consumer that calls `capture_exception` / `add_breadcrumb` and has not called `init_error_tracking` stops reporting to Sentry through those shims and reports nothing until it does; call `init_error_tracking` (alongside `init_sentry` during a parity window) before upgrading. A direct caller of `get_posthog_errors_client` or `PosthogErrorsClient` must now pass `daily_ceiling`. A consumer pinning `posthog<7.65.0` must raise its pin to install the `[posthog]` extra (the known consumers pin 7.x). Not tagged in this change: publishing is a separate step that tags the merge commit.
 
 ## [1.5.0] - 2026-08-10
 
