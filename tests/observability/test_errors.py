@@ -13,7 +13,6 @@ import wxyc_fastapi.observability.errors as errors_module
 from wxyc_fastapi.observability.errors import (
     ERRORS_BURST,
     ERRORS_DEDUPE_WINDOW_SECONDS,
-    ERRORS_EVENTS_PER_MINUTE,
     PosthogErrorsClient,
     PosthogErrorsHandler,
     get_posthog_errors_client,
@@ -44,7 +43,15 @@ def _record(
 
 
 def _client(inner: MagicMock, clock: FakeClock | None = None, **kwargs) -> PosthogErrorsClient:
+    kwargs.setdefault("service", "svc")
+    kwargs.setdefault("environment", "production")
     return PosthogErrorsClient(inner, clock=clock or FakeClock(), **kwargs)
+
+
+def _get(**kwargs):
+    kwargs.setdefault("service", "svc")
+    kwargs.setdefault("environment", "production")
+    return get_posthog_errors_client(**kwargs)
 
 
 def _exc_info():
@@ -57,37 +64,64 @@ def _exc_info():
 class TestGetPosthogErrorsClient:
     def test_none_when_key_unset(self, monkeypatch):
         monkeypatch.delenv("POSTHOG_ERRORS_API_KEY", raising=False)
-        assert get_posthog_errors_client() is None
+        assert _get() is None
 
     def test_none_when_only_analytics_key_set(self, monkeypatch):
         monkeypatch.delenv("POSTHOG_ERRORS_API_KEY", raising=False)
         monkeypatch.setenv("POSTHOG_API_KEY", "phc_analytics")
-        assert get_posthog_errors_client() is None
+        assert _get() is None
 
     def test_constructs_with_errors_key_and_code_variables_off(self, monkeypatch):
         monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
         monkeypatch.setenv("POSTHOG_API_KEY", "phc_analytics")
         monkeypatch.delenv("POSTHOG_HOST", raising=False)
         with patch("posthog.Posthog") as mock_cls:
-            client = get_posthog_errors_client()
+            client = _get()
         assert isinstance(client, PosthogErrorsClient)
         args, kwargs = mock_cls.call_args
         assert args == ("phc_errors",)
         assert kwargs["host"] == "https://us.i.posthog.com"
         assert kwargs["capture_exception_code_variables"] is False
 
+    def test_import_failure_returns_none_warns_once_and_is_cached(self, monkeypatch, caplog):
+        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
+        monkeypatch.setitem(sys.modules, "posthog", None)  # makes ``from posthog import ...`` raise
+        with caplog.at_level(logging.WARNING, logger=errors_module.__name__):
+            assert _get() is None
+            assert _get() is None
+        assert len(caplog.records) == 1
+
+    def test_constructor_failure_returns_none_warns_once_and_does_not_retry(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
+        with patch("posthog.Posthog", side_effect=RuntimeError("bad config")) as mock_cls:
+            with caplog.at_level(logging.WARNING, logger=errors_module.__name__):
+                assert _get() is None
+                assert _get() is None
+        assert mock_cls.call_count == 1
+        assert len(caplog.records) == 1
+
+    def test_passes_service_environment_and_ceiling_to_client(self, monkeypatch):
+        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
+        with patch("posthog.Posthog"):
+            client = _get(service="lml", environment="staging", daily_ceiling=864)
+        assert client._service == "lml"
+        assert client._base_properties["environment"] == "staging"
+        assert client._rate_per_second == pytest.approx(0.01)
+
     def test_is_a_singleton_independent_of_analytics_client(self, monkeypatch):
         monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
         with patch("posthog.Posthog"):
-            assert get_posthog_errors_client() is get_posthog_errors_client()
+            assert _get() is _get()
 
     def test_shutdown_shuts_inner_down_and_clears_singleton(self, monkeypatch):
         monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
         with patch("posthog.Posthog") as mock_cls:
-            first = get_posthog_errors_client()
+            first = _get()
             shutdown_posthog_errors()
             mock_cls.return_value.shutdown.assert_called_once()
-            assert get_posthog_errors_client() is not first
+            assert _get() is not first
 
     def test_shutdown_is_noop_without_client(self):
         shutdown_posthog_errors()
@@ -126,11 +160,13 @@ class TestHandlerWithoutExcInfo:
         props = kwargs["properties"]
         assert props["$exception_list"] == [
             {
-                "type": "svc.lookup",
+                "type": "Message",
                 "value": "lookup failed for Juana Molina",
-                "mechanism": {"handled": True, "type": "logging"},
+                "mechanism": {"type": "generic", "handled": True, "synthetic": True},
             }
         ]
+        assert props["logger"] == "svc.lookup"
+        assert props["$exception_level"] == "error"
 
     def test_fingerprint_uses_unformatted_template(self):
         inner = MagicMock()
@@ -171,14 +207,35 @@ class TestHandlerWithoutExcInfo:
         PosthogErrorsHandler(_client(inner)).handle(_record())  # must not raise
 
 
-class TestDistinctId:
-    def test_both_paths_use_the_fixed_errors_distinct_id(self):
+class TestEventProperties:
+    def test_both_paths_stamp_identity_properties_and_use_service_as_distinct_id(self):
         inner = MagicMock()
-        handler = PosthogErrorsHandler(_client(inner))
+        handler = PosthogErrorsHandler(_client(inner, service="lml", environment="staging"))
         handler.handle(_record("a"))
         handler.handle(_record("b", exc_info=_exc_info()))
-        assert inner.capture.call_args.kwargs["distinct_id"] == "wxyc-fastapi-errors"
-        assert inner.capture_exception.call_args.kwargs["distinct_id"] == "wxyc-fastapi-errors"
+        for call in (inner.capture.call_args, inner.capture_exception.call_args):
+            assert call.kwargs["distinct_id"] == "lml"
+            props = call.kwargs["properties"]
+            assert props["service"] == "lml"
+            assert props["environment"] == "staging"
+            assert props["$process_person_profile"] is False
+
+    def test_distinct_id_constant_is_gone(self):
+        assert not hasattr(errors_module, "_DISTINCT_ID")
+
+    @pytest.mark.parametrize(
+        ("version", "sets_level"),
+        [("7.64.9", True), ("6.9.0", True), ("7.65.0", False), ("7.72.0", False)],
+    )
+    def test_exception_path_sets_level_only_below_7_65_0(self, version, sets_level):
+        inner = MagicMock()
+        with patch("posthog.version.VERSION", version):
+            client = _client(inner)
+        PosthogErrorsHandler(client).handle(_record(exc_info=_exc_info()))
+        props = inner.capture_exception.call_args.kwargs["properties"]
+        assert ("$exception_level" in props) is sets_level
+        if sets_level:
+            assert props["$exception_level"] == "error"
 
 
 class TestReentrancy:
@@ -228,13 +285,12 @@ class TestReentrancy:
 
 class TestBucket:
     def test_defaults_are_named_constants(self):
-        assert ERRORS_EVENTS_PER_MINUTE > 0
-        assert ERRORS_BURST >= 1
+        assert ERRORS_BURST == 20
         assert ERRORS_DEDUPE_WINDOW_SECONDS > 0
 
     def test_drops_beyond_burst_across_both_paths(self):
         inner = MagicMock()
-        handler = PosthogErrorsHandler(_client(inner, events_per_minute=60, burst=2))
+        handler = PosthogErrorsHandler(_client(inner, daily_ceiling=86400 * 60, burst=2))
 
         handler.handle(_record("a"))
         handler.handle(_record("b", exc_info=_exc_info()))
@@ -245,7 +301,7 @@ class TestBucket:
     def test_refill_admits_later_errors(self):
         inner = MagicMock()
         clock = FakeClock()
-        handler = PosthogErrorsHandler(_client(inner, clock, events_per_minute=60, burst=1))
+        handler = PosthogErrorsHandler(_client(inner, clock, daily_ceiling=86400 * 60, burst=1))
 
         handler.handle(_record("a"))
         handler.handle(_record("b"))  # dropped
@@ -256,7 +312,7 @@ class TestBucket:
 
     def test_dropped_records_do_not_consume_tokens_via_dedupe(self):
         inner = MagicMock()
-        handler = PosthogErrorsHandler(_client(inner, events_per_minute=60, burst=2))
+        handler = PosthogErrorsHandler(_client(inner, daily_ceiling=86400 * 60, burst=2))
 
         handler.handle(_record("same"))
         handler.handle(_record("same"))  # deduped, costs no token
@@ -265,11 +321,37 @@ class TestBucket:
         assert inner.capture.call_count == 2
 
 
+class TestBudget:
+    def test_defaults_admit_twenty_then_one_token_per_ceiling_interval(self):
+        inner = MagicMock()
+        clock = FakeClock()
+        client = _client(inner, clock, daily_ceiling=300)  # one token every 288 s
+        for i in range(25):
+            client.capture_message(logger_name="svc", template=f"m{i}", message="m")
+        assert inner.capture.call_count == 20
+
+        clock.advance(287)
+        client.capture_message(logger_name="svc", template="late", message="m")
+        assert inner.capture.call_count == 20
+        clock.advance(1.5)
+        client.capture_message(logger_name="svc", template="late", message="m")
+        assert inner.capture.call_count == 21
+
+    def test_repeat_inside_dedupe_window_costs_no_token(self):
+        inner = MagicMock()
+        client = _client(inner, daily_ceiling=300)
+        for _ in range(50):
+            client.capture_message(logger_name="svc", template="same", message="m")
+        for i in range(19):
+            client.capture_message(logger_name="svc", template=f"m{i}", message="m")
+        assert inner.capture.call_count == 20
+
+
 class TestDropLogging:
     def test_drops_log_one_rate_limited_warning(self, caplog):
         inner = MagicMock()
         clock = FakeClock()
-        client = _client(inner, clock, events_per_minute=60, burst=1)
+        client = _client(inner, clock, daily_ceiling=86400 * 60, burst=1)
         with caplog.at_level(logging.WARNING, logger=errors_module.__name__):
             client.capture_message(logger_name="svc", template="a", message="a")
             client.capture_message(logger_name="svc", template="a", message="a")  # deduped
@@ -332,7 +414,7 @@ class TestDedupe:
     def test_seen_table_is_bounded(self):
         inner = MagicMock()
         clock = FakeClock()
-        client = _client(inner, clock, events_per_minute=1e9, burst=1e9)
+        client = _client(inner, clock, daily_ceiling=1e9, burst=1e9)
         for i in range(errors_module._MAX_TRACKED_FINGERPRINTS + 50):
             client.capture_message(logger_name="svc", template=f"m{i}", message="m")
             clock.advance(0.001)

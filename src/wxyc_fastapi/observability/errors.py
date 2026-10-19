@@ -4,21 +4,26 @@
 from the analytics ``POSTHOG_API_KEY`` so a service's errors can land in a
 different PostHog project than its analytics. With the key unset it returns
 ``None`` and ``PosthogErrorsHandler`` is never given a client to forward to
-(fail-open). Frame locals (``capture_exception_code_variables``) stay off.
+(fail-open), and so does a missing ``posthog`` extra or a failing SDK
+constructor: one warning, the failure is cached, ``None`` is returned. Frame locals (``capture_exception_code_variables``) stay off.
 
 ``PosthogErrorsHandler`` stands in for Sentry's ``LoggingIntegration``: every
 record at ERROR or above is reported. Records carrying ``exc_info`` go through
 the SDK's ``capture_exception``; message-only records — which the SDK's
 ``capture_exception`` silently drops because there is no active exception — are
-sent as a synthesized ``$exception`` event whose ``$exception_fingerprint`` is
+sent as a synthesized ``$exception`` event (type ``Message``, a synthetic generic
+mechanism, a ``logger`` property, level ``error``) whose ``$exception_fingerprint`` is
 ``"<logger name>:<unformatted msg>"``, so occurrences group by call site rather
 than by interpolated values. PostHog types the fingerprint as a single string;
 an event carrying a list is dropped at ingestion.
 
+Every event carries ``service``, ``environment`` and ``$process_person_profile:
+false``, and ``distinct_id`` is the service name.
+
 PostHog's free plan caps exceptions at 100K/month, so the client gates both
-paths behind a token bucket (``ERRORS_EVENTS_PER_MINUTE`` sustained,
-``ERRORS_BURST`` capacity) and a same-fingerprint dedupe window
-(``ERRORS_DEDUPE_WINDOW_SECONDS``). Like the analytics limiter this is a
+paths behind a same-fingerprint dedupe window (``ERRORS_DEDUPE_WINDOW_SECONDS``)
+and then a token bucket (``ERRORS_BURST`` capacity, refilled at
+``daily_ceiling / 86400`` tokens per second). Like the analytics limiter this is a
 per-process circuit breaker, not a budget enforcer: N workers admit N× the rate.
 """
 
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -42,20 +48,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ERRORS_EVENTS_PER_MINUTE = 30.0
-ERRORS_BURST = 100.0
+ERRORS_BURST = 20.0
+ERRORS_DAILY_CEILING = 300.0
 ERRORS_DEDUPE_WINDOW_SECONDS = 60.0
 
 _MAX_TRACKED_FINGERPRINTS = 1000
-_DISTINCT_ID = "wxyc-fastapi-errors"
 _DROP_LOG_INTERVAL_SECONDS = 60.0
 # Logger trees whose output must never be re-reported: the SDK's own
 # diagnostics (its consumer thread logs failed sends) and this client's module
 # tree, which could log while a capture is in flight. The rest of the package
 # (e.g. ``wxyc_fastapi.healthcheck``) reports real errors and is captured.
 _SELF_LOGGER_TREES = ("posthog", "wxyc_fastapi.observability")
+_SECONDS_PER_DAY = 86400.0
+# posthog-python 7.65.0 sets ``$exception_level`` itself and warns on an override.
+_SDK_SETS_LEVEL_FROM = (7, 65, 0)
 
 _client: PosthogErrorsClient | None = None
+_init_failed = False
 _lock = threading.Lock()
 
 
@@ -70,13 +79,22 @@ class PosthogErrorsClient:
         self,
         inner: Posthog,
         *,
-        events_per_minute: float = ERRORS_EVENTS_PER_MINUTE,
+        service: str,
+        environment: str,
+        daily_ceiling: float = ERRORS_DAILY_CEILING,
         burst: float = ERRORS_BURST,
         dedupe_window_seconds: float = ERRORS_DEDUPE_WINDOW_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._inner = inner
-        self._rate_per_second = events_per_minute / 60.0
+        self._service = service
+        self._base_properties: dict[str, Any] = {
+            "service": service,
+            "environment": environment,
+            "$process_person_profile": False,
+        }
+        self._sdk_omits_level = _sdk_omits_exception_level()
+        self._rate_per_second = daily_ceiling / _SECONDS_PER_DAY
         self._burst = burst
         self._dedupe_window = dedupe_window_seconds
         self._clock = clock
@@ -90,7 +108,12 @@ class PosthogErrorsClient:
     def capture_exception(self, exc_info: ExcInfo, *, logger_name: str, template: str) -> None:
         """Report a record's active exception via the SDK's ``capture_exception``."""
         if self._admit(":".join((logger_name, template, exc_info[0].__name__))):
-            self._inner.capture_exception(exc_info, distinct_id=_DISTINCT_ID)
+            properties = dict(self._base_properties)
+            if self._sdk_omits_level:
+                properties["$exception_level"] = "error"
+            self._inner.capture_exception(
+                exc_info, distinct_id=self._service, properties=properties
+            )
 
     def capture_message(self, *, logger_name: str, template: str, message: str) -> None:
         """Report a message-only record as a synthesized ``$exception`` event."""
@@ -98,16 +121,19 @@ class PosthogErrorsClient:
         if self._admit(fingerprint):
             self._inner.capture(
                 event="$exception",
-                distinct_id=_DISTINCT_ID,
+                distinct_id=self._service,
                 properties={
+                    **self._base_properties,
                     "$exception_list": [
                         {
-                            "type": logger_name,
+                            "type": "Message",
                             "value": message,
-                            "mechanism": {"handled": True, "type": "logging"},
+                            "mechanism": {"type": "generic", "handled": True, "synthetic": True},
                         }
                     ],
                     "$exception_fingerprint": fingerprint,
+                    "$exception_level": "error",
+                    "logger": logger_name,
                 },
             )
 
@@ -205,26 +231,56 @@ def _is_self_logger(name: str) -> bool:
     return any(name == tree or name.startswith(tree + ".") for tree in _SELF_LOGGER_TREES)
 
 
-def get_posthog_errors_client() -> PosthogErrorsClient | None:
-    """Return the singleton errors client, or ``None`` when ``POSTHOG_ERRORS_API_KEY`` is unset."""
-    global _client
+def _sdk_omits_exception_level() -> bool:
+    """True when the installed ``posthog`` predates the release that sets ``$exception_level``."""
+    try:
+        from posthog.version import VERSION  # noqa: PLC0415
+
+        parts = tuple(int(n) for n in re.findall(r"\d+", VERSION)[:3])
+        return parts < _SDK_SETS_LEVEL_FROM
+    except Exception:
+        return False
+
+
+def get_posthog_errors_client(
+    *, service: str, environment: str, daily_ceiling: float = ERRORS_DAILY_CEILING
+) -> PosthogErrorsClient | None:
+    """Return the singleton errors client, or ``None`` when it cannot be built.
+
+    ``None`` means ``POSTHOG_ERRORS_API_KEY`` is unset, or the ``posthog`` import or
+    constructor failed (one warning, then the failure is cached and not retried).
+    ``service`` is the event ``distinct_id``; ``environment`` is ``production``,
+    ``staging`` or ``development``; ``daily_ceiling`` sets the bucket refill rate.
+    """
+    global _client, _init_failed
     with _lock:
         api_key = os.environ.get("POSTHOG_ERRORS_API_KEY")
-        if not api_key:
+        if not api_key or _init_failed:
             return None
         if _client is None:
-            from posthog import Posthog  # noqa: PLC0415  lazy: only needed when key is set
+            try:
+                from posthog import Posthog  # noqa: PLC0415  lazy: only needed when key is set
 
-            host = os.environ.get("POSTHOG_HOST", _DEFAULT_HOST)
-            _client = PosthogErrorsClient(
-                Posthog(api_key, host=host, capture_exception_code_variables=False)
-            )
+                host = os.environ.get("POSTHOG_HOST", _DEFAULT_HOST)
+                _client = PosthogErrorsClient(
+                    Posthog(api_key, host=host, capture_exception_code_variables=False),
+                    service=service,
+                    environment=environment,
+                    daily_ceiling=daily_ceiling,
+                )
+            except Exception:
+                _init_failed = True
+                logger.warning(
+                    "PostHog errors client unavailable; error reporting disabled", exc_info=True
+                )
+                return None
         return _client
 
 
 def shutdown_posthog_errors() -> None:
     """Shut down the errors client and clear the singleton. Safe no-op when uninitialized."""
-    global _client
+    global _client, _init_failed
+    _init_failed = False
     if _client is not None:
         _client.shutdown()
         _client = None
