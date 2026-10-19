@@ -190,7 +190,7 @@ class TestExceptionHandler:
         assert response.status_code == 500
 
 
-class _BadStr(Exception):
+class _BadStrError(Exception):
     def __str__(self) -> str:
         raise RuntimeError("no str")
 
@@ -203,8 +203,8 @@ class TestRaisingStr:
         try:
             _init()
             try:
-                raise _BadStr()
-            except _BadStr:
+                raise _BadStrError()
+            except _BadStrError:
                 sys.excepthook(*sys.exc_info())
         finally:
             sys.excepthook = original
@@ -213,7 +213,7 @@ class TestRaisingStr:
 
     def test_shim_does_not_raise_and_still_sends(self, inner):
         _init()
-        capture_exception(_BadStr())
+        capture_exception(_BadStrError())
         assert inner.capture_exception.call_count == 1
 
 
