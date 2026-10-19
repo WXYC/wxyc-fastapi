@@ -72,7 +72,7 @@ def init_error_tracking(
     value passes through with one warning. ``daily_ceiling`` is the per-process
     budget in events per day, with no default. ``release`` is stamped on every event when given; ``before_send``
     may return ``None`` to drop an event. Pass ``app`` to install the request-id
-    middleware and the unhandled-exception handler. Safe to call more than once: the
+    middleware and the unhandled-exception handler. When ``app`` is passed, the function adds middleware, so call it before the app starts (at module level or in the app factory), not inside a lifespan; Starlette raises "Cannot add middleware after an application has started" otherwise. Safe to call more than once: the
     first call's ``service``, ``environment`` and ``daily_ceiling`` win, with one warning
     (a call after ``shutdown_posthog_errors`` leaves the handler and hooks on the old client).
     """
