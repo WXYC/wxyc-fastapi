@@ -151,6 +151,13 @@ class TestExceptionHandler:
         assert inner.capture_exception.call_count == 1
         assert inner.capture_exception.call_args.args[0][0] is ValueError
 
+    def test_the_500_echoes_the_request_id_the_event_carries(self, inner):
+        app = _app()
+        _init(app=app)
+        response = TestClient(app, raise_server_exceptions=False).get("/boom")
+        event_id = inner.capture_exception.call_args.kwargs["properties"]["request_id"]
+        assert response.headers["X-Request-ID"] == event_id
+
     def test_the_server_logging_the_reraised_exception_does_not_report_twice(self, inner):
         app = _app()
         _init(app=app)
@@ -181,6 +188,33 @@ class TestExceptionHandler:
         _init(app=app)
         response = TestClient(app, raise_server_exceptions=False).get("/boom")
         assert response.status_code == 500
+
+
+class _BadStr(Exception):
+    def __str__(self) -> str:
+        raise RuntimeError("no str")
+
+
+class TestRaisingStr:
+    def test_excepthook_still_chains_and_sends(self, inner):
+        calls = []
+        original = sys.excepthook
+        sys.excepthook = lambda *a: calls.append(a)
+        try:
+            _init()
+            try:
+                raise _BadStr()
+            except _BadStr:
+                sys.excepthook(*sys.exc_info())
+        finally:
+            sys.excepthook = original
+        assert len(calls) == 1
+        assert inner.capture_exception.call_count == 1
+
+    def test_shim_does_not_raise_and_still_sends(self, inner):
+        _init()
+        capture_exception(_BadStr())
+        assert inner.capture_exception.call_count == 1
 
 
 class TestExcepthooks:

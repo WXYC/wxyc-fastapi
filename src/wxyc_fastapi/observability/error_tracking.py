@@ -151,7 +151,9 @@ def _unhandled_exception_handler(client: PosthogErrorsClient):
             mechanism={"type": "starlette", "handled": False},
             dedupe_on_message=True,
         )
-        return PlainTextResponse("Internal Server Error", status_code=500)
+        # This runs outside RequestIdMiddleware, so the response must echo the id itself.
+        headers = {_REQUEST_ID_HEADER: request_id} if request_id else None
+        return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
 
     return handler
 
@@ -173,9 +175,11 @@ def _install_excepthooks(client: PosthogErrorsClient) -> None:
         )
 
     def excepthook(exc_type, exc, tb) -> None:
-        if issubclass(exc_type, Exception):
-            report((exc_type, exc, tb), "uncaught exception", "excepthook")
-        previous(exc_type, exc, tb)
+        try:
+            if issubclass(exc_type, Exception):
+                report((exc_type, exc, tb), "uncaught exception", "excepthook")
+        finally:
+            previous(exc_type, exc, tb)
 
     def thread_excepthook(args: threading.ExceptHookArgs) -> None:
         if args.exc_type is not SystemExit:
