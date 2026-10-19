@@ -120,7 +120,9 @@ def add_breadcrumb(
 
     The category kwarg is required so each consumer keeps its own taxonomy
     (``"discogs"``, ``"groq"``, ...). The tag rides on events captured inside an
-    active ``posthog.contexts.new_context()``; otherwise the breadcrumb is dropped.
+    active ``posthog.contexts.new_context()``. ``RequestIdMiddleware`` opens one per
+    request, so route code needs none; outside a request (and outside any context)
+    the breadcrumb is dropped.
     ``data`` and ``level`` are accepted but not recorded.
     """
     try:
