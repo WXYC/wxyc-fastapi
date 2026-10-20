@@ -37,7 +37,9 @@ per-process circuit breaker, not a budget enforcer: N workers admit N× the rate
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
+import datetime
 import logging
 import os
 import re
@@ -48,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 from wxyc_fastapi.observability.posthog import _DEFAULT_HOST
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from types import TracebackType
 
     from posthog import Posthog
@@ -167,7 +169,12 @@ class PosthogErrorsClient:
 
     def _event_properties(self) -> dict[str, Any]:
         request_id = request_id_var.get()
-        return {**self._base_properties, **({"request_id": request_id} if request_id else {})}
+        crumbs = _breadcrumbs_var.get()
+        return {
+            **self._base_properties,
+            **({"request_id": request_id} if request_id else {}),
+            **({"breadcrumbs": list(crumbs)} if crumbs else {}),
+        }
 
     def capture_message(self, *, logger_name: str, template: str, message: str) -> None:
         """Report a message-only record as a synthesized ``$exception`` event."""
@@ -334,6 +341,24 @@ def get_current_errors_client() -> PosthogErrorsClient | None:
     return _client
 
 
+_MAX_BREADCRUMBS = 50
+_MAX_BREADCRUMB_CHARS = 1000
+_breadcrumbs_var: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
+    "wxyc_fastapi_breadcrumbs", default=None
+)
+
+
+@contextlib.contextmanager
+def request_breadcrumbs() -> Iterator[list[dict[str, Any]]]:
+    """Open a fresh per-request breadcrumb trail; ``RequestIdMiddleware`` wraps each request in one."""
+    trail: list[dict[str, Any]] = []
+    token = _breadcrumbs_var.set(trail)
+    try:
+        yield trail
+    finally:
+        _breadcrumbs_var.reset(token)
+
+
 def add_breadcrumb(
     *,
     category: str,
@@ -341,20 +366,31 @@ def add_breadcrumb(
     data: dict[str, Any] | None = None,
     level: str = "info",
 ) -> None:
-    """Record ``message`` as a ``breadcrumb.<category>`` tag on the current PostHog context.
+    """Append ``{category, message, level, data, timestamp}`` to the current request's trail.
 
     The category kwarg is required so each consumer keeps its own taxonomy
-    (``"discogs"``, ``"groq"``, ...). The tag rides on events captured inside an
-    active ``posthog.contexts.new_context()``. ``RequestIdMiddleware`` opens one per
-    request, so route code needs none; outside a request (and outside any context)
-    the breadcrumb is dropped.
-    ``data`` and ``level`` are accepted but not recorded.
+    (``"discogs"``, ``"groq"``, ...). The trail lives in this package's own contextvar,
+    opened per request by ``RequestIdMiddleware``; it is attached to ``$exception``
+    events only, as the ``breadcrumbs`` property, and never reaches analytics events.
+    The last 50 entries are kept; ``message`` is truncated to 1000 characters and a
+    ``data`` whose ``repr`` exceeds that becomes its truncated ``repr`` string.
+    Outside a request the breadcrumb is dropped.
     """
-    try:
-        from posthog import contexts  # noqa: PLC0415  lazy: optional ``posthog`` extra
-    except ImportError:
+    trail = _breadcrumbs_var.get()
+    if trail is None:
         return
-    contexts.tag(f"breadcrumb.{category}", message)
+    if data is not None and len(repr(data)) > _MAX_BREADCRUMB_CHARS:
+        data = repr(data)[:_MAX_BREADCRUMB_CHARS]  # type: ignore[assignment]
+    trail.append(
+        {
+            "category": category,
+            "message": str(message)[:_MAX_BREADCRUMB_CHARS],
+            "level": level,
+            "data": data,
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+    )
+    del trail[:-_MAX_BREADCRUMBS]
 
 
 def capture_exception(

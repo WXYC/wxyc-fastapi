@@ -316,13 +316,38 @@ class TestCaptureExceptionShim:
 
 
 class TestAddBreadcrumbShim:
-    def test_tags_the_active_context(self, inner):
-        with contexts.new_context(), patch.object(contexts, "tag", wraps=contexts.tag) as tag:
+    def test_appends_to_the_open_trail_without_tagging_the_context(self):
+        with (
+            errors_module.request_breadcrumbs() as trail,
+            contexts.new_context(),
+            patch.object(contexts, "tag") as tag,
+        ):
             add_breadcrumb(category="discogs", message="search_releases", data={"q": "x"})
-        tag.assert_called_once_with("breadcrumb.discogs", "search_releases")
+        tag.assert_not_called()
+        (crumb,) = trail
+        assert (crumb["category"], crumb["message"], crumb["level"]) == (
+            "discogs",
+            "search_releases",
+            "info",
+        )
+        assert crumb["data"] == {"q": "x"}
+        assert crumb["timestamp"]
 
-    def test_is_dropped_without_an_active_context(self):
+    def test_is_dropped_without_an_open_trail(self):
         add_breadcrumb(category="discogs", message="search_releases")  # must not raise
+
+    def test_keeps_the_last_fifty(self):
+        with errors_module.request_breadcrumbs() as trail:
+            for i in range(60):
+                add_breadcrumb(category="step", message=str(i))
+        assert [c["message"] for c in trail] == [str(i) for i in range(10, 60)]
+
+    def test_bounds_an_oversized_message_and_payload(self):
+        with errors_module.request_breadcrumbs() as trail:
+            add_breadcrumb(category="step", message="m" * 5000, data={"blob": "d" * 50000})
+        (crumb,) = trail
+        assert len(crumb["message"]) <= errors_module._MAX_BREADCRUMB_CHARS
+        assert len(crumb["data"]) <= errors_module._MAX_BREADCRUMB_CHARS
 
 
 def _routes(app: FastAPI) -> FastAPI:
@@ -493,52 +518,6 @@ class TestDedupeKeys:
         assert all(len(k) < 300 for k in client._seen)
 
 
-class TestBreadcrumbIsolation:
-    def test_tag_reaches_the_event_and_stays_in_its_request(self, monkeypatch):
-        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
-        events: list[dict] = []
-
-        def keep(event):
-            events.append(event)
-            return None  # drop: nothing leaves the process
-
-        app = FastAPI()
-        gate = {"a": asyncio.Event(), "b": asyncio.Event()}
-
-        @app.get("/{name}")
-        async def route(name: str):
-            with contexts.new_context():
-                add_breadcrumb(category="step", message=f"crumb-{name}")
-                gate[name].set()
-                await asyncio.wait_for(gate["a"].wait(), 5)
-                await asyncio.wait_for(gate["b"].wait(), 5)
-                capture_exception(ValueError(name))
-            return {}
-
-        async def run():
-            _init(app=app, before_send=keep)
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-                await asyncio.gather(c.get("/a"), c.get("/b"))
-
-        try:
-            asyncio.run(run())
-        finally:
-            for handler in [
-                h for h in logging.getLogger().handlers if isinstance(h, PosthogErrorsHandler)
-            ]:
-                logging.getLogger().removeHandler(handler)
-            from wxyc_fastapi.observability import shutdown_posthog_errors
-
-            shutdown_posthog_errors()
-            et_module._hooks_installed = False
-        by_value = {e["properties"]["$exception_list"][0]["value"]: e for e in events}
-        assert set(by_value) == {"a", "b"}
-        for name, event in by_value.items():
-            tags = {k: v for k, v in event["properties"].items() if k.startswith("breadcrumb.")}
-            assert tags == {"breadcrumb.step": f"crumb-{name}"}
-
-
 class TestRequestContext:
     """The middleware opens the posthog context, so routes never have to."""
 
@@ -569,19 +548,60 @@ class TestRequestContext:
             et_module._hooks_installed = False
         return events
 
-    def test_breadcrumb_then_error_log_carries_the_tag(self, monkeypatch):
+    def test_two_same_category_breadcrumbs_then_error_log_land_on_one_exception(self, monkeypatch):
         app = FastAPI()
 
         @app.get("/log")
         async def route():
-            add_breadcrumb(category="discogs", message="search_releases")
+            add_breadcrumb(category="discogs", message="search", data={"q": "x"}, level="warning")
+            add_breadcrumb(category="discogs", message="fetch", data={"id": 7})
             logging.getLogger("svc.route").error("lookup failed")
             return {}
 
         (event,) = self._run(monkeypatch, app, ["/log"])
-        assert event["properties"]["breadcrumb.discogs"] == "search_releases"
+        crumbs = event["properties"]["breadcrumbs"]
+        assert [(c["category"], c["message"], c["level"], c["data"]) for c in crumbs] == [
+            ("discogs", "search", "warning", {"q": "x"}),
+            ("discogs", "fetch", "info", {"id": 7}),
+        ]
+        assert not any(k.startswith("breadcrumb.") for k in event["properties"])
 
-    def test_concurrent_requests_carry_only_their_own_tags(self, monkeypatch):
+    def test_event_without_breadcrumbs_has_no_property(self, monkeypatch):
+        app = FastAPI()
+
+        @app.get("/log")
+        async def route():
+            logging.getLogger("svc.route").error("lookup failed")
+            return {}
+
+        (event,) = self._run(monkeypatch, app, ["/log"])
+        assert "breadcrumbs" not in event["properties"]
+
+    def test_analytics_events_do_not_carry_breadcrumbs(self, monkeypatch):
+        from posthog import Posthog
+
+        analytics: list[dict] = []
+
+        def keep(event):
+            analytics.append(event)
+            return None
+
+        sdk = Posthog("phc_analytics", before_send=keep, disable_geoip=True)
+        app = FastAPI()
+
+        @app.get("/lookup")
+        async def route():
+            add_breadcrumb(category="discogs", message="search_releases", data={"q": "x"})
+            sdk.capture("lookup_completed", distinct_id="svc")
+            return {}
+
+        self._run(monkeypatch, app, ["/lookup"])
+        (event,) = analytics
+        assert event["event"] == "lookup_completed"
+        assert not any(k.startswith("breadcrumb") for k in event["properties"])
+        assert not any(t.startswith("breadcrumb") for t in event["properties"]["$context_tags"])
+
+    def test_concurrent_requests_carry_only_their_own_breadcrumbs(self, monkeypatch):
         app = FastAPI()
         gate = {"a": asyncio.Event(), "b": asyncio.Event()}
 
@@ -599,8 +619,7 @@ class TestRequestContext:
         assert set(by_value) == {"a", "b"}
         for name, event in by_value.items():
             props = event["properties"]
-            tags = {k: v for k, v in props.items() if k.startswith("breadcrumb.")}
-            assert tags == {"breadcrumb.step": f"crumb-{name}"}
+            assert [c["message"] for c in props["breadcrumbs"]] == [f"crumb-{name}"]
             assert props["request_id"] == name
 
     def test_route_exception_is_sent_once(self, monkeypatch):
@@ -617,7 +636,7 @@ class TestRequestContext:
 
         (event,) = self._run(monkeypatch, app, ["/crash"])
         props = event["properties"]
-        assert props["breadcrumb.discogs"] == "search_releases"
+        assert [c["message"] for c in props["breadcrumbs"]] == ["search_releases"]
         assert props["request_id"] == "crash"
         mechanism = props["$exception_list"][0]["mechanism"]
         assert (mechanism["type"], mechanism["handled"]) == ("starlette", False)
