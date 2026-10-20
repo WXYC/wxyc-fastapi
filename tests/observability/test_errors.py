@@ -3,6 +3,7 @@
 Singleton state reset lives in this directory's conftest.py.
 """
 
+import atexit
 import logging
 import sys
 from unittest.mock import MagicMock, patch
@@ -124,6 +125,32 @@ class TestGetPosthogErrorsClient:
             shutdown_posthog_errors()
             mock_cls.return_value.shutdown.assert_called_once()
             assert _get() is not first
+
+    def test_building_the_client_registers_one_atexit_shutdown(self, monkeypatch):
+        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
+        with patch("posthog.Posthog") as mock_cls, patch.object(atexit, "register") as register:
+            _get()
+            _get()
+        register.assert_called_once_with(shutdown_posthog_errors)
+        register.call_args.args[0]()
+        mock_cls.return_value.shutdown.assert_called_once()
+
+    def test_rebuilding_after_shutdown_does_not_register_a_second_hook(self, monkeypatch):
+        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
+        with patch("posthog.Posthog"), patch.object(atexit, "register") as register:
+            _get()
+            shutdown_posthog_errors()
+            _get()
+        register.assert_called_once()
+
+    def test_a_failed_build_registers_no_hook(self, monkeypatch):
+        monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
+        with (
+            patch("posthog.Posthog", side_effect=RuntimeError("bad")),
+            patch.object(atexit, "register") as register,
+        ):
+            assert _get() is None
+        register.assert_not_called()
 
     def test_shutdown_is_noop_without_client(self):
         shutdown_posthog_errors()
