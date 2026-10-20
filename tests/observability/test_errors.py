@@ -5,6 +5,8 @@ Singleton state reset lives in this directory's conftest.py.
 
 import atexit
 import logging
+import os
+import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -135,13 +137,72 @@ class TestGetPosthogErrorsClient:
         register.call_args.args[0]()
         mock_cls.return_value.shutdown.assert_called_once()
 
-    def test_rebuilding_after_shutdown_does_not_register_a_second_hook(self, monkeypatch):
+    def test_rebuilding_after_shutdown_reregisters_the_hook_after_the_sdk_client_is_built(
+        self, monkeypatch
+    ):
+        # atexit is LIFO: the wxyc hook must be registered after the SDK client's own join hook
+        # so it runs first. A rebuild therefore unregisters and re-registers it, leaving one live.
         monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
-        with patch("posthog.Posthog"), patch.object(atexit, "register") as register:
+        events: list[str] = []
+        with (
+            patch(
+                "posthog.Posthog", side_effect=lambda *a, **k: events.append("sdk") or MagicMock()
+            ),
+            patch.object(
+                atexit, "register", side_effect=lambda f: events.append(f"register:{f.__name__}")
+            ),
+            patch.object(
+                atexit,
+                "unregister",
+                side_effect=lambda f: events.append(f"unregister:{f.__name__}"),
+            ),
+        ):
             _get()
             shutdown_posthog_errors()
             _get()
-        register.assert_called_once()
+        hook = shutdown_posthog_errors.__name__
+        assert events[-3:] == ["sdk", f"unregister:{hook}", f"register:{hook}"]
+        live = 0
+        for e in events:
+            if e == f"register:{hook}":
+                live += 1
+            elif e == f"unregister:{hook}":
+                live = max(live - 1, 0)
+        assert live == 1
+
+    def test_at_interpreter_exit_the_hook_runs_before_a_rebuilt_clients_sdk_join(self, tmp_path):
+        # Real atexit in a child process, with a stand-in SDK that registers its join hook on
+        # construction the way posthog.Client does. No network. (Installed SDKs differ on whether
+        # a join-first order hangs or merely drops events, so the order itself is asserted.)
+        script = tmp_path / "child.py"
+        script.write_text(
+            "import atexit, sys, types\n"
+            "order = []\n"
+            "class Posthog:\n"
+            "    def __init__(self, *a, **k):\n"
+            "        atexit.register(self.join)\n"
+            "    def join(self):\n"
+            "        order.append('sdk-join')\n"
+            "    def flush(self):\n"
+            "        order.append('flush')\n"
+            "    def shutdown(self):\n"
+            "        order.append('shutdown')\n"
+            "sys.modules['posthog'] = types.SimpleNamespace(Posthog=Posthog)\n"
+            "atexit.register(lambda: print(','.join(order)))\n"
+            "from wxyc_fastapi.observability.errors import get_posthog_errors_client as g, "
+            "shutdown_posthog_errors as sd\n"
+            "g(service='s', environment='e', daily_ceiling=300)\n"
+            "sd()\n"
+            "order.clear()\n"
+            "g(service='s', environment='e', daily_ceiling=300)\n"
+        )
+        env = {**os.environ, "POSTHOG_ERRORS_API_KEY": "phc_test"}
+        result = subprocess.run(
+            [sys.executable, str(script)], env=env, timeout=20, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+        steps = result.stdout.strip().split(",")
+        assert steps.index("shutdown") < steps.index("sdk-join"), steps
 
     def test_a_failed_build_registers_no_hook(self, monkeypatch):
         monkeypatch.setenv("POSTHOG_ERRORS_API_KEY", "phc_errors")
