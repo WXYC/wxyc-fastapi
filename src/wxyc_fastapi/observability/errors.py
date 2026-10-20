@@ -150,7 +150,12 @@ class PosthogErrorsClient:
         name = exc_info[0].__name__
         detail = f"{name}:{_safe_str(exc)}"[:200] if dedupe_on_message else name
         if self._admit(f"{logger_name}:{template}:{detail}"):
-            merged = {**(properties or {}), "logger": logger_name, **self._event_properties()}
+            merged = {
+                **(_error_tags_var.get() or {}),
+                **(properties or {}),
+                "logger": logger_name,
+                **self._event_properties(),
+            }
             if self._sdk_omits_level:
                 merged["$exception_level"] = "error"
             extra = (
@@ -173,7 +178,6 @@ class PosthogErrorsClient:
         request_id = request_id_var.get()
         crumbs = _breadcrumbs_var.get()
         return {
-            **(_error_tags_var.get() or {}),
             **self._base_properties,
             **({"request_id": request_id} if request_id else {}),
             **({"breadcrumbs": list(crumbs)} if crumbs else {}),
@@ -188,6 +192,7 @@ class PosthogErrorsClient:
                 event="$exception",
                 distinct_id=self._service,
                 properties={
+                    **(_error_tags_var.get() or {}),
                     **self._event_properties(),
                     "$exception_list": [
                         {
@@ -354,7 +359,7 @@ _error_tags_var: contextvars.ContextVar[dict[str, str] | None] = contextvars.Con
     "wxyc_fastapi_error_tags", default=None
 )
 _RESERVED_TAG_KEYS = frozenset(
-    {"service", "environment", "release", "$process_person_profile", "request_id", "breadcrumbs"}
+    {"service", "environment", "release", "request_id", "breadcrumbs", "logger"}
 )
 _warned_tag_outside_request = False
 
@@ -376,10 +381,12 @@ def set_error_tag(key: str, value: str) -> None:
     """Tag the current request's ``$exception`` events with ``key`` = ``value``.
 
     Like the breadcrumb trail, the tags live in this package's own contextvar, opened per
-    request by ``RequestIdMiddleware``, and never reach analytics events. The contract fields
-    (``service``, ``environment``, ``release``, ``$process_person_profile``, ``request_id``)
-    and ``breadcrumbs`` cannot be tagged: such a key is ignored. ``value`` is truncated to 200 characters. Outside a
-    request the call is dropped, with one warning per process.
+    request by ``RequestIdMiddleware``, and never reach analytics events. The contract
+    fields (``service``, ``environment``, ``release``, ``request_id``), ``breadcrumbs``,
+    ``logger`` and any ``$``-prefixed key (the SDK's and PostHog's own properties) cannot
+    be tagged: such a key is ignored. Tags go in first, so the properties a call passes in
+    win over them. ``value`` is truncated to 200 characters. Outside a request the call is
+    dropped, with one warning per process.
     """
     global _warned_tag_outside_request  # noqa: PLW0603
     tags = _error_tags_var.get()
@@ -388,7 +395,7 @@ def set_error_tag(key: str, value: str) -> None:
             _warned_tag_outside_request = True
             logger.warning("set_error_tag called outside a request; tag dropped")
         return
-    if key not in _RESERVED_TAG_KEYS:
+    if key not in _RESERVED_TAG_KEYS and not key.startswith("$"):
         tags[key] = str(value)[:_MAX_TAG_CHARS]
 
 
