@@ -47,6 +47,10 @@ Dropped captures batch into at most one `telemetry_rate_limited` event per minut
 
 Fidelity: `CountingPosthog.capture` mirrors the posthog 7.x signature the consumers pin (`capture(event, *, distinct_id=..., properties=...)`), so the legacy `capture("uid", "event")` two-positional form raises `TypeError` — the real 7.x SDK logs-and-discards that call, and a budget test must fail loudly rather than certify telemetry production would drop. `capture_exception` records a `$exception` event; `feature_enabled`/`get_feature_flag` resolve to `None` and record nothing. For call sites annotated `Posthog | None`, wrap the fake in `as_posthog(...)` (a zero-cost `typing.cast`) to satisfy mypy.
 
+### Isolating error-tracking state
+
+`isolated_error_tracking(stub=None)` (context manager) and the `isolated_error_tracking_stub` fixture (import it into a `conftest.py`) let a wiring test call `init_error_tracking(...)` without touching underscore names. Inside the block `POSTHOG_ERRORS_API_KEY` is set, the errors client singleton is cleared, and `posthog.Posthog` returns the yielded `CountingPosthog`, so a `logging.error(...)` after init records one `$exception` on it. On exit, even when the body raises, the root logger's handlers, `sys.excepthook`, `threading.excepthook`, the excepthook-installed flag and the singleton are restored. Needs the `posthog` extra.
+
 ## Telemetry
 
 `RequestTelemetry(api_call_keys, distinct_id, event_prefix, emit_step_events=True)` tracks step timings + per-service API-call counts for a single request. The `event_prefix` namespaces the emitted PostHog events: `lookup` produces `lookup_<step>` per-step events and a `lookup_completed` summary; `request` produces `request_<step>` and `request_completed`.
