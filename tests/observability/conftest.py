@@ -21,6 +21,7 @@ def _reset_posthog_state():
     errors_module._client = None
     errors_module._init_failed = False
     errors_module._config = None
+    errors_module._atexit_registered = False
     errors_module._warned_conflicts.clear()
     et_module._warned_environments.clear()
     yield
