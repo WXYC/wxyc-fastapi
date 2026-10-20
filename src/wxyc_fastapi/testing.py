@@ -34,9 +34,15 @@ Example::
 
 from __future__ import annotations
 
+import logging
+import sys
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
+from unittest import mock
+
+import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -146,3 +152,50 @@ def capture_budget(
             f"PostHog capture budget exceeded: {len(captured)} events captured, "
             f"budget {max_events}. Events: {names}"
         )
+
+
+@contextmanager
+def isolated_error_tracking(stub: CountingPosthog | None = None) -> Iterator[CountingPosthog]:
+    """Run the with-block against a fresh, stubbed error-tracking singleton.
+
+    Sets ``POSTHOG_ERRORS_API_KEY``, clears the errors client singleton, and patches
+    ``posthog.Posthog`` to return ``stub`` (a fresh ``CountingPosthog`` by default),
+    which is yielded. On exit, even when the block raises, the root logger's handlers,
+    ``sys.excepthook``, ``threading.excepthook``, the excepthook-installed flag and the
+    singleton are put back, and the env var is restored. Needs the ``posthog`` extra.
+    """
+    from wxyc_fastapi.observability import error_tracking, errors  # noqa: PLC0415
+
+    posthog_stub = stub if stub is not None else CountingPosthog()
+    root = logging.getLogger()
+    saved = (
+        root.handlers[:],
+        sys.excepthook,
+        threading.excepthook,
+        error_tracking._hooks_installed,
+        (errors._client, errors._config, errors._init_failed),
+    )
+    errors._client, errors._config, errors._init_failed = None, None, False
+    error_tracking._hooks_installed = False
+    try:
+        with (
+            mock.patch.dict("os.environ", {"POSTHOG_ERRORS_API_KEY": "phc_test"}),
+            mock.patch("posthog.Posthog", return_value=posthog_stub),
+        ):
+            yield posthog_stub
+    finally:
+        root.handlers[:] = saved[0]
+        sys.excepthook, threading.excepthook = saved[1], saved[2]
+        error_tracking._hooks_installed = saved[3]
+        errors._client, errors._config, errors._init_failed = saved[4]
+
+
+@pytest.fixture
+def isolated_error_tracking_stub() -> Iterator[CountingPosthog]:
+    """Pytest fixture form of :func:`isolated_error_tracking`; yields its stub.
+
+    Import it into a ``conftest.py`` (``from wxyc_fastapi.testing import
+    isolated_error_tracking_stub``) to use it by name.
+    """
+    with isolated_error_tracking() as stub:
+        yield stub

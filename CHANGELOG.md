@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file. Format foll
 
 ## [Unreleased]
 
+### Added
+- `wxyc_fastapi.testing.isolated_error_tracking(stub=None)` and the `isolated_error_tracking_stub` pytest fixture: run a test against a fresh error-tracking singleton wired to a `CountingPosthog`, with root handlers, both excepthooks, the hooks-installed flag and the singleton restored on exit. Consumers no longer need to reach into private names in wiring tests. Consumer impact: none until adopted.
+
 ## [2.0.0] - 2026-10-19
 
 ### Removed
