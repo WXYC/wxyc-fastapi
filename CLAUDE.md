@@ -2,7 +2,7 @@
 
 ## Project overview
 
-`wxyc-fastapi` is the shared FastAPI service template extracted from `library-metadata-lookup`, `request-o-matic`, and `semantic-index`. It carries the primitives every WXYC FastAPI service needs (Sentry init, request telemetry, cache-stats recorder, PostHog wrapper) and lets the next fix land once instead of three times.
+`wxyc-fastapi` is the shared FastAPI service template extracted from `library-metadata-lookup`, `request-o-matic`, and `semantic-index`. It carries the primitives every WXYC FastAPI service needs (PostHog error tracking, request telemetry, cache-stats recorder, PostHog wrapper) and lets the next fix land once instead of three times.
 
 The motivation, drift inventory, phasing (A → E), and decisions are in [the wiki plan](https://github.com/WXYC/wiki/blob/main/plans/wxyc-fastapi.md). Project board: [WXYC #29](https://github.com/orgs/WXYC/projects/29). Epic: [#1](https://github.com/WXYC/wxyc-fastapi/issues/1).
 
@@ -18,7 +18,7 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/http-singleton.md`](docs/http-singleton.md)** — `async_singleton(factory)` double-check-lock rationale (LML#241 FD-leak race), closer dispatch across `aclose()` / coroutine-`close()` / sync-`close()`, factory-exception retry semantics
 - **[`docs/db-lazy-pg.md`](docs/db-lazy-pg.md)** — `LazyPgConnection` sync-psycopg wrapper (lifted from semantic-index), graceful-degradation `None` return contract, why this is sync-only and async services should use `async_singleton(asyncpg.create_pool)` instead
 - **[`docs/release.md`](docs/release.md)** — Tag-pushed PyPI Trusted Publishing flow, CHANGELOG "Consumer impact" rule
-- **[`docs/migration-playbook.md`](docs/migration-playbook.md)** — Step-by-step recipe for consumer-side tickets A2/A3/A4 (LML, rom, semantic-index): pyproject pin, swap `core/sentry.py` + `core/telemetry.py`, cache-stats free-function → recorder-method migration
+- **[`docs/migration-playbook.md`](docs/migration-playbook.md)** — Step-by-step recipe for consumer-side tickets A2/A3/A4 (LML, rom, semantic-index): pyproject pin, swap `core/telemetry.py`, cache-stats free-function → recorder-method migration
 
 Read the relevant topic doc before doing work in that area.
 

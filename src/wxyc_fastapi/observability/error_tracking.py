@@ -1,4 +1,4 @@
-"""``init_error_tracking``: the one call that replaces ``init_sentry``'s error path.
+"""``init_error_tracking``: the one call that sets up PostHog error reporting.
 
 It builds the ``PosthogErrorsClient`` (``errors.py``), attaches its logging handler
 to the root logger, chains ``sys.excepthook`` / ``threading.excepthook`` for
@@ -7,8 +7,6 @@ All three paths send through the one client, so its dedupe window and token buck
 cover them (the SDK's own autocapture stays off: it would bypass that gate). Every path
 marks an exception once its capture is admitted and skips marked ones, so one failure
 is one event in any order. With ``app``, ``RequestIdMiddleware`` stamps ``request_id``.
-
-``init_sentry`` is untouched, so a consumer can run both during a parity window.
 """
 
 from __future__ import annotations

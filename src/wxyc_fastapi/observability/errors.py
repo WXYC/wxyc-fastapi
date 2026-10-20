@@ -20,6 +20,10 @@ an event carrying a list is dropped at ingestion.
 Every event carries ``service``, ``environment`` and ``$process_person_profile:
 false`` (plus ``release`` when known), and ``distinct_id`` is the service name.
 A send that raises is swallowed (fail-open), so no caller sees an SDK error.
+
+``capture_exception`` and ``add_breadcrumb`` are the call-site shims: the first reports
+through this client (a no-op until ``init_error_tracking`` has run), the second tags the
+current ``posthog.contexts`` context.
 ``daily_ceiling`` has no default: the contract's sizes differ per service. The first
 ``get_posthog_errors_client`` call wins; a later call with different values logs one
 warning that they are ignored.
@@ -328,6 +332,50 @@ def mark_reported(exc: BaseException | None) -> None:
 def get_current_errors_client() -> PosthogErrorsClient | None:
     """Return the already-built singleton without constructing one, or ``None``."""
     return _client
+
+
+def add_breadcrumb(
+    *,
+    category: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+    level: str = "info",
+) -> None:
+    """Record ``message`` as a ``breadcrumb.<category>`` tag on the current PostHog context.
+
+    The category kwarg is required so each consumer keeps its own taxonomy
+    (``"discogs"``, ``"groq"``, ...). The tag rides on events captured inside an
+    active ``posthog.contexts.new_context()``. ``RequestIdMiddleware`` opens one per
+    request, so route code needs none; outside a request (and outside any context)
+    the breadcrumb is dropped.
+    ``data`` and ``level`` are accepted but not recorded.
+    """
+    try:
+        from posthog import contexts  # noqa: PLC0415  lazy: optional ``posthog`` extra
+    except ImportError:
+        return
+    contexts.tag(f"breadcrumb.{category}", message)
+
+
+def capture_exception(
+    error: Exception,
+    context: dict[str, Any] | None = None,
+    *,
+    context_name: str = "request",
+) -> None:
+    """Report ``error`` through the PostHog errors client, if ``init_error_tracking`` ran.
+
+    ``context`` is attached as the ``context_name`` event property (default ``"request"``).
+    """
+    client = get_current_errors_client()
+    if client is not None:
+        client.capture_exception(
+            (type(error), error, error.__traceback__),
+            logger_name="capture_exception",
+            template=context_name,
+            dedupe_on_message=True,
+            properties={context_name: context} if context else None,
+        )
 
 
 def get_posthog_errors_client(

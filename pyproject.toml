@@ -1,14 +1,14 @@
 [project]
 name = "wxyc-fastapi"
-version = "1.6.0"
-description = "Shared FastAPI service primitives for WXYC: Sentry init, request telemetry, cache-stats recorder, PostHog wrapper, healthcheck routers, async-singleton, lazy PG"
+version = "2.0.0"
+description = "Shared FastAPI service primitives for WXYC: PostHog error tracking, request telemetry, cache-stats recorder, PostHog wrapper, healthcheck routers, async-singleton, lazy PG"
 requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
     { name = "WXYC Engineering" },
 ]
-keywords = ["fastapi", "sentry", "posthog", "telemetry", "wxyc"]
+keywords = ["fastapi", "posthog", "telemetry", "wxyc"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: FastAPI",
@@ -21,7 +21,6 @@ classifiers = [
 dependencies = [
     "fastapi>=0.110",
     "httpx>=0.25",
-    "sentry-sdk[fastapi]>=2.0",
 ]
 
 [project.optional-dependencies]

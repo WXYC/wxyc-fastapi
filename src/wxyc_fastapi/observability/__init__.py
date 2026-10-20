@@ -1,4 +1,4 @@
-"""Observability primitives: Sentry init, request telemetry, cache-stats recorder, PostHog wrapper."""
+"""Observability primitives: PostHog error tracking, request telemetry, cache-stats recorder, PostHog wrapper."""
 
 from wxyc_fastapi.observability.cache_stats import (
     CacheStatsRecorder,
@@ -12,6 +12,8 @@ from wxyc_fastapi.observability.error_tracking import init_error_tracking
 from wxyc_fastapi.observability.errors import (
     PosthogErrorsClient,
     PosthogErrorsHandler,
+    add_breadcrumb,
+    capture_exception,
     get_posthog_errors_client,
     shutdown_posthog_errors,
 )
@@ -19,11 +21,6 @@ from wxyc_fastapi.observability.posthog import (
     flush_posthog,
     get_posthog_client,
     shutdown_posthog,
-)
-from wxyc_fastapi.observability.sentry import (
-    add_breadcrumb,
-    capture_exception,
-    init_sentry,
 )
 from wxyc_fastapi.observability.telemetry import (
     RequestTelemetry,
@@ -45,7 +42,6 @@ __all__ = [
     "get_posthog_errors_client",
     "init_cache_stats",
     "init_error_tracking",
-    "init_sentry",
     "shutdown_posthog",
     "shutdown_posthog_errors",
     "timed_api",

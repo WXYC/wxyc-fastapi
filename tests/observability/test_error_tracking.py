@@ -1,9 +1,10 @@
-"""Tests for ``init_error_tracking``, its FastAPI handler, and the re-routed Sentry shims.
+"""Tests for ``init_error_tracking``, its FastAPI handler, and the ``capture_exception`` / ``add_breadcrumb`` shims.
 
 Singleton and warn-once state reset lives in this directory's conftest.py.
 """
 
 import asyncio
+import importlib
 import logging
 import re
 import sys
@@ -16,7 +17,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from posthog import contexts
 
+import wxyc_fastapi.observability as observability
 import wxyc_fastapi.observability.error_tracking as et_module
+import wxyc_fastapi.observability.errors as errors_module
 from wxyc_fastapi.observability import add_breadcrumb, capture_exception
 from wxyc_fastapi.observability.error_tracking import init_error_tracking
 from wxyc_fastapi.observability.errors import (
@@ -281,6 +284,17 @@ class TestClientContract:
         assert client._sdk_omits_level is True
 
 
+class TestShimExports:
+    def test_shims_live_in_errors_and_are_exported_from_the_package(self):
+        assert errors_module.capture_exception is capture_exception
+        assert errors_module.add_breadcrumb is add_breadcrumb
+
+    def test_sentry_is_gone(self):
+        with pytest.raises(ImportError):
+            importlib.import_module("wxyc_fastapi.observability.sentry")
+        assert not hasattr(observability, "init_sentry")
+
+
 class TestCaptureExceptionShim:
     def test_routes_to_the_errors_client_with_context_as_properties(self, inner):
         _init()
@@ -300,12 +314,6 @@ class TestCaptureExceptionShim:
         capture_exception(ValueError("boom"))
         inner.capture_exception.assert_not_called()
 
-    def test_does_not_touch_sentry(self, inner):
-        _init()
-        with patch("wxyc_fastapi.observability.sentry.sentry_sdk") as sentry:
-            capture_exception(ValueError("boom"))
-        sentry.capture_exception.assert_not_called()
-
 
 class TestAddBreadcrumbShim:
     def test_tags_the_active_context(self, inner):
@@ -315,11 +323,6 @@ class TestAddBreadcrumbShim:
 
     def test_is_dropped_without_an_active_context(self):
         add_breadcrumb(category="discogs", message="search_releases")  # must not raise
-
-    def test_does_not_touch_sentry(self):
-        with patch("wxyc_fastapi.observability.sentry.sentry_sdk") as sentry:
-            add_breadcrumb(category="discogs", message="m")
-        sentry.add_breadcrumb.assert_not_called()
 
 
 def _routes(app: FastAPI) -> FastAPI:

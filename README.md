@@ -9,7 +9,8 @@ Shared FastAPI service template for WXYC's Python services. Consolidates the dup
 ```
 wxyc_fastapi/
 ├── observability/
-│   ├── sentry.py        # init_sentry(), add_breadcrumb(), capture_exception()
+│   ├── errors.py        # PosthogErrorsClient, PosthogErrorsHandler, add_breadcrumb(), capture_exception()
+│   ├── error_tracking.py # init_error_tracking()
 │   ├── telemetry.py     # RequestTelemetry, StepResult, track_step, as_server_timing
 │   ├── cache_stats.py   # ContextVar, init_cache_stats, record_*, get_cache_stats
 │   └── posthog.py       # get_posthog_client(event_prefix) — capture rate limiter, flush, shutdown
@@ -29,7 +30,7 @@ Cross-language consolidation (codegen and healthcheck response shape) lives in [
 
 | Phase | Module | Version |
 |---|---|---|
-| A | `observability/*` (sentry, telemetry, cache_stats, posthog) | v0.1.0 |
+| A | `observability/*` (error tracking, telemetry, cache_stats, posthog) | v0.1.0 |
 | B | `healthcheck/*` (Python implementation) | v0.2.0 |
 | C | Healthcheck response schemas in `wxyc-shared/api.yaml` (parallel with B) | (no `wxyc-fastapi` version bump) |
 | D | `http/singleton` | v0.3.0 |

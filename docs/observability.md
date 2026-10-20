@@ -1,6 +1,6 @@
 # Observability
 
-The `wxyc_fastapi.observability` module ships three coupled concerns: cache stats (per-request metric dict in a ContextVar), the PostHog client wrapper, and request telemetry that drives the per-step PostHog events. Sentry init lives in the same module but is documented inline in the public-API section of [`architecture.md`](architecture.md#public-api-surface).
+The `wxyc_fastapi.observability` module ships three coupled concerns: cache stats (per-request metric dict in a ContextVar), the PostHog client wrapper, and request telemetry that drives the per-step PostHog events. Error tracking (`init_error_tracking` and the `capture_exception` / `add_breadcrumb` shims) is covered below.
 
 ## Cache stats: behavior recap
 
@@ -34,13 +34,12 @@ Dropped captures batch into at most one `telemetry_rate_limited` event per minut
 
 ## init_error_tracking
 
-`init_error_tracking(service=..., environment=..., daily_ceiling=..., release=None, before_send=None, app=None)` (`observability/error_tracking.py`) is the one call that replaces `init_sentry`'s error path; it returns the client, or `None` when `POSTHOG_ERRORS_API_KEY` is unset. It attaches `PosthogErrorsHandler` to the root logger (once), chains `sys.excepthook` and `threading.excepthook` for exception autocapture, and, given `app`, registers an `Exception` handler that returns a plain 500. When `app` is passed, the function adds middleware, so call it before the app starts (at module level or in the app factory), not inside a lifespan; Starlette raises "Cannot add middleware after an application has started" otherwise. All three send through the one client, so its dedupe and token bucket cover them; the SDK's own `enable_exception_autocapture` is left off because it would bypass that gate.
+`init_error_tracking(service=..., environment=..., daily_ceiling=..., release=None, before_send=None, app=None)` (`observability/error_tracking.py`) is the one call that sets up error reporting; it returns the client, or `None` when `POSTHOG_ERRORS_API_KEY` is unset. It attaches `PosthogErrorsHandler` to the root logger (once), chains `sys.excepthook` and `threading.excepthook` for exception autocapture, and, given `app`, registers an `Exception` handler that returns a plain 500. When `app` is passed, the function adds middleware, so call it before the app starts (at module level or in the app factory), not inside a lifespan; Starlette raises "Cannot add middleware after an application has started" otherwise. All three send through the one client, so its dedupe and token bucket cover them; the SDK's own `enable_exception_autocapture` is left off because it would bypass that gate.
 
 - **One event per unhandled exception:** Starlette re-raises after the handler runs and uvicorn then logs "Exception in ASGI application" at ERROR with `exc_info`. The handler marks the exception (`mark_reported`) and `PosthogErrorsHandler` skips marked exceptions.
 - **Environment:** normalized to `production`, `staging` or `development` (`prod`, `stage`, `dev`, `local` are aliases, case and whitespace insensitive); an unknown value passes through with one warning.
 - **Shims:** `capture_exception(err, context, context_name=)` reports through the same client with `context` as the `context_name` property (no-op before init). `add_breadcrumb(category=, message=)` tags the current `posthog.contexts` context with `breadcrumb.<category>`; `RequestIdMiddleware` opens a fresh `new_context(fresh=True, capture_exceptions=False)` per request (without the `posthog` extra it opens none), so tags land on that request's events (route crashes included: the middleware reports them inside the context before the 500 handler runs) and never leak between requests; do not open your own `new_context()` around routes, whose default `capture_exceptions=True` would send each exception twice, bypassing the client's gate. Outside a request and any context the breadcrumb is dropped, and `data` / `level` are not recorded.
 - **Request id and mechanisms:** with `app=`, `RequestIdMiddleware` reads a valid `X-Request-ID` (1-128 of `[A-Za-z0-9._-]`) or generates one, echoes it, and events in the request carry `request_id`. Crashes (excepthooks, route 500s) are sent with `mechanism.handled = false` (SDK 7.65.0+). Every capture path marks the exception once admitted and skips marked ones, so one failure is one event. Not stamped: `repo`, `tool` and `run_id` are ETL properties.
-- `init_sentry` is untouched, so both can run during a parity window.
 
 ## Testing helpers
 
