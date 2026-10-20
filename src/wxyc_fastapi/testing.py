@@ -42,8 +42,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest import mock
 
-import pytest
-
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -177,6 +175,11 @@ def isolated_error_tracking(stub: CountingPosthog | None = None) -> Iterator[Cou
     )
     errors._client, errors._config, errors._init_failed = None, None, False
     error_tracking._hooks_installed = False
+    # init_error_tracking skips adding a handler when one is already present, which
+    # would leave the stub with no handler; take any existing ones off for the block.
+    root.handlers[:] = [
+        h for h in root.handlers if not isinstance(h, error_tracking.PosthogErrorsHandler)
+    ]
     try:
         with (
             mock.patch.dict("os.environ", {"POSTHOG_ERRORS_API_KEY": "phc_test"}),
@@ -190,12 +193,18 @@ def isolated_error_tracking(stub: CountingPosthog | None = None) -> Iterator[Cou
         errors._client, errors._config, errors._init_failed = saved[4]
 
 
-@pytest.fixture
-def isolated_error_tracking_stub() -> Iterator[CountingPosthog]:
-    """Pytest fixture form of :func:`isolated_error_tracking`; yields its stub.
+try:
+    import pytest
+except ImportError:  # pragma: no cover - exercised by a test that hides pytest
+    pass
+else:
 
-    Import it into a ``conftest.py`` (``from wxyc_fastapi.testing import
-    isolated_error_tracking_stub``) to use it by name.
-    """
-    with isolated_error_tracking() as stub:
-        yield stub
+    @pytest.fixture
+    def isolated_error_tracking_stub() -> Iterator[CountingPosthog]:
+        """Pytest fixture form of :func:`isolated_error_tracking`; yields its stub.
+
+        Import it into a ``conftest.py`` (``from wxyc_fastapi.testing import
+        isolated_error_tracking_stub``) to use it by name.
+        """
+        with isolated_error_tracking() as stub:
+            yield stub
