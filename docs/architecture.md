@@ -9,7 +9,8 @@ src/wxyc_fastapi/
 ├── observability/         # v0.1.0 — Phase A
 │   ├── __init__.py        # re-exports (grows as PRs land)
 │   ├── cache_stats.py     # PR 1: init_cache_stats, CacheStatsRecorder, timed_pg, timed_api
-│   ├── sentry.py          # PR 2: init_sentry, add_breadcrumb, capture_exception
+│   ├── errors.py          # v1.6.0: PosthogErrorsClient/Handler + add_breadcrumb, capture_exception shims
+│   ├── error_tracking.py  # v1.6.0: init_error_tracking
 │   ├── posthog.py         # PR 2: get_posthog_client (warn-once), flush, shutdown; v1.4.0 capture rate limiter
 │   └── telemetry.py       # PR 3: RequestTelemetry, StepResult, track_step, send_to_posthog
 ├── healthcheck/           # v0.2.0 — Phase B
@@ -26,7 +27,6 @@ tests/
 ├── conftest.py            # cache-stats ContextVar isolation fixture
 ├── observability/
 │   ├── test_cache_stats.py  # PR 1
-│   ├── test_sentry.py       # PR 2
 │   ├── test_error_tracking.py  # v1.6.0
 │   ├── test_posthog.py      # PR 2
 │   ├── test_posthog_ratelimit.py  # v1.4.0
@@ -53,7 +53,7 @@ PR 3 completes the v0.1.0 surface. Consumers should import from `wxyc_fastapi.ob
 
 ```python
 from wxyc_fastapi.observability import (
-    init_sentry, add_breadcrumb, capture_exception,
+    init_error_tracking, add_breadcrumb, capture_exception,
     RequestTelemetry, StepResult,
     init_cache_stats, get_cache_stats_recorder, get_cache_stats, CacheStatsRecorder,
     timed_pg, timed_api,
@@ -73,14 +73,12 @@ The shared modules are parameterized so each consumer can keep its existing taxo
 
 | Parameter | LML | rom | semantic-index |
 |---|---|---|---|
-| `init_sentry(service_name=...)` | `"library-metadata-lookup"` | `"request-o-matic"` | `"semantic-index"` |
+| `init_error_tracking(service=...)` | `"library-metadata-lookup"` | `"request-o-matic"` | `"semantic-index"` |
 | `init_cache_stats(extra_keys=...)` | `None` | `["memory_misses"]` | `None` |
 | `RequestTelemetry.api_call_keys` | `["discogs"]` | `["groq", "discogs", "slack"]` | `[]` |
 | `RequestTelemetry.distinct_id` | `"library-metadata-lookup-service"` | `"request-o-matic-service"` | `"semantic-index-service"` |
 | `RequestTelemetry.event_prefix` | `"lookup"` | `"request"` | `"explore"` |
 | `get_posthog_client(event_prefix=...)` | `"lookup"` | `"request"` | `"explore"` (no-op; semantic-index doesn't install the `[posthog]` extra) |
-
-`HttpxIntegration` is default-on in `init_sentry` — see CHANGELOG's "Consumer impact" line. Pass `integrations=[FastApiIntegration()]` to opt out.
 
 ## Versioning
 
@@ -94,13 +92,14 @@ The shared modules are parameterized so each consumer can keep its existing taxo
 | 1.2.0 | — | `as_server_timing(descriptions=...)` — per-leg `desc="..."` annotation for derived/overlapping legs, sanitized against header injection (additive; see [`observability.md`](observability.md#telemetry)) |
 | 1.3.0 | — | `RequestTelemetry(emit_step_events=False)` — suppress unconsumed per-step PostHog events, summary-only (additive; see [`observability.md`](observability.md#telemetry)) |
 | 1.4.0 | — | PostHog capture rate limiter (token-bucket proxy from `get_posthog_client`, `telemetry_rate_limited` drop reports) + `wxyc_fastapi.testing` capture-budget helpers (see [`observability.md`](observability.md#posthog-wrapper)) |
+| 2.0.0 | — | **Breaking:** `init_sentry` and the `sentry-sdk` dependency removed; `observability/sentry.py` deleted (`capture_exception` / `add_breadcrumb` now live in `errors.py`, same import path from `wxyc_fastapi.observability`) |
 | 1.6.0 | — | `init_error_tracking(...)` (PostHog error tracking: FastAPI handler, exception autocapture, `before_send`) + `capture_exception` / `add_breadcrumb` shims re-routed to PostHog; `daily_ceiling` required (see [`observability.md`](observability.md#init_error_tracking)) |
 
 The package follows SemVer. Now that 1.0 is cut, consumers pin the major range `wxyc-fastapi>=1.x,<2` (e.g. a consumer that calls a method added in 1.1.0 pins `>=1.1.0,<2.0.0`); a breaking change bumps to 2.0.0.
 
 ## Dependencies
 
-- Required: `fastapi>=0.110`, `httpx>=0.25`, `sentry-sdk[fastapi]>=2.0`
+- Required: `fastapi>=0.110`, `httpx>=0.25`
 - Extras: `[posthog]` (used by PR 2's posthog module), `[psycopg]` (Phase E `db.lazy_pg`), `[asyncpg]` (forward-looking, no consumer today), `[dev]`
 
-`fastapi` and `sentry-sdk` are required deps even at PR 1 because the eventual v0.1.0 surface needs them; pyproject.toml is forward-looking so subsequent PRs don't need to bump the dep set.
+Sentry is no longer a dependency (removed in 2.0.0).

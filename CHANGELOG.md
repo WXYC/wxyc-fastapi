@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. Format foll
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-19
+
+### Removed
+- **Breaking:** `init_sentry`, `_default_integrations` and the `sentry-sdk[fastapi]` dependency. `wxyc_fastapi.observability.sentry` is deleted, so `from wxyc_fastapi.observability.sentry import ...` and `from wxyc_fastapi.observability import init_sentry` raise `ImportError`. Use `init_error_tracking` (added in 1.6.0). The `sentry` package keyword and the "Sentry init" wording in the package description are gone too.
+
+### Changed
+- `capture_exception` and `add_breadcrumb` moved from `observability/sentry.py` to `observability/errors.py`. They are still exported from `wxyc_fastapi.observability` under the same names and behave as in 1.6.0 (PostHog-routed). Only a deep import of `wxyc_fastapi.observability.sentry` breaks.
+
+### Consumer impact
+- A consumer that still calls `init_sentry` must move to `init_error_tracking` before raising its pin to 2.x; the known consumers pin `<2.0.0`, so nothing breaks until they bump. A consumer that relied on `sentry-sdk` arriving transitively through `wxyc-fastapi` must declare it itself. Not tagged in this change: publishing is a separate step that tags the merge commit.
+
 ## [1.6.0] - 2026-10-19
 
 ### Added
