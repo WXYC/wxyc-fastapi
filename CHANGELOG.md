@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file. Format foll
 ### Added
 - `wxyc_fastapi.testing.isolated_error_tracking(stub=None)` and the `isolated_error_tracking_stub` pytest fixture: run a test against a fresh error-tracking singleton wired to a `CountingPosthog`, with root handlers, both excepthooks, the hooks-installed flag and the singleton restored on exit. Consumers no longer need to reach into private names in wiring tests. Consumer impact: none until adopted.
 
+### Changed
+- `add_breadcrumb` now records a real trail: each call appends `{category, message, level, data, timestamp}` to a per-request list in the package's own contextvar (opened by `RequestIdMiddleware`; last 50 kept, message and data size-bounded), and `PosthogErrorsClient` attaches it to `$exception` events only as the `breadcrumbs` property. It no longer calls `posthog.contexts.tag`, so breadcrumbs stop leaking into analytics events captured in the same request, `data` and `level` are kept, and two breadcrumbs of one category no longer overwrite each other. Outside a request a breadcrumb is still dropped. The `breadcrumb.<category>` event properties are gone; read `breadcrumbs` instead.
+
 ## [2.0.0] - 2026-10-19
 
 ### Removed

@@ -27,6 +27,7 @@ from wxyc_fastapi.observability.errors import (
     PosthogErrorsHandler,
     get_current_errors_client,
     get_posthog_errors_client,
+    request_breadcrumbs,
     request_id_var,
 )
 
@@ -136,7 +137,7 @@ class RequestIdMiddleware:
             await send(message)
 
         try:
-            with _request_context():
+            with _request_context(), request_breadcrumbs():
                 try:
                     await self.app(scope, receive, send_with_id)
                 except Exception as exc:
@@ -152,7 +153,7 @@ class RequestIdMiddleware:
 
 
 def _request_context() -> AbstractContextManager[Any]:
-    """A fresh posthog context so ``add_breadcrumb`` / ``contexts.tag`` land on this request's events."""
+    """A fresh posthog context so ``contexts.tag`` lands on this request's events."""
     try:
         from posthog import contexts  # noqa: PLC0415  lazy: optional ``posthog`` extra
     except ImportError:
