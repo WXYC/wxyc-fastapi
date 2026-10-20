@@ -85,9 +85,6 @@ _client: PosthogErrorsClient | None = None
 _config: tuple[str, str, float] | None = None
 _warned_conflicts: set[tuple[str, str, float]] = set()
 _init_failed = False
-# Process-wide, not per client: the hook shuts down whichever singleton is current, so a client
-# rebuilt after ``shutdown_posthog_errors`` is covered by the hook already registered.
-_atexit_registered = False
 _lock = threading.Lock()
 
 
@@ -440,11 +437,11 @@ def get_posthog_errors_client(
     ``None`` means ``POSTHOG_ERRORS_API_KEY`` is unset, or the ``posthog`` import or
     constructor failed (one warning, cached). ``service`` is the ``distinct_id``;
     ``daily_ceiling`` sets the bucket refill rate; ``release`` is stamped on events;
-    ``before_send`` goes to the SDK. The first build registers ``shutdown_posthog_errors`` with
-    ``atexit`` (after lifespan teardown, so close-step errors still send), so consumers need not. The first call wins; a differing later call
+    ``before_send`` goes to the SDK. Every build (re)registers ``shutdown_posthog_errors`` with
+    ``atexit``, after the SDK's own hook so it runs first (after lifespan teardown, so close-step errors still send), so consumers need not. The first call wins; a differing later call
     gets the existing client and one warning.
     """
-    global _client, _config, _init_failed, _atexit_registered
+    global _client, _config, _init_failed
     with _lock:
         api_key = os.environ.get("POSTHOG_ERRORS_API_KEY")
         if not api_key or _init_failed:
@@ -467,9 +464,11 @@ def get_posthog_errors_client(
                     release=release,
                 )
                 _config = (service, environment, daily_ceiling)
-                if not _atexit_registered:
-                    atexit.register(shutdown_posthog_errors)
-                    _atexit_registered = True
+                # ``atexit`` is LIFO and the SDK registers its own join hook per client, so
+                # re-register on every build: the wxyc hook must be newer than the current
+                # client's join hook to run first (a join-first order leaves flush() blocked).
+                atexit.unregister(shutdown_posthog_errors)
+                atexit.register(shutdown_posthog_errors)
             except Exception:
                 _init_failed = True
                 logger.warning(
