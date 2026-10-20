@@ -27,6 +27,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from wxyc_fastapi.observability.errors import (
     PosthogErrorsClient,
     PosthogErrorsHandler,
+    get_current_errors_client,
     get_posthog_errors_client,
     request_id_var,
 )
@@ -138,7 +139,16 @@ class RequestIdMiddleware:
 
         try:
             with _request_context():
-                await self.app(scope, receive, send_with_id)
+                try:
+                    await self.app(scope, receive, send_with_id)
+                except Exception as exc:
+                    # Report inside the request's context so the event carries its
+                    # breadcrumbs and tags; the exception handler runs outside user
+                    # middleware and skips the exception once it is marked reported.
+                    client = get_current_errors_client()
+                    if client is not None:
+                        _report_unhandled(client, exc, request_id)
+                    raise
         finally:
             request_id_var.reset(token)
 
@@ -154,17 +164,21 @@ def _request_context() -> AbstractContextManager[Any]:
     return contexts.new_context(fresh=True, capture_exceptions=False)
 
 
+def _report_unhandled(client: PosthogErrorsClient, exc: Exception, request_id: str | None) -> None:
+    client.capture_exception(
+        (type(exc), exc, exc.__traceback__),
+        logger_name="fastapi",
+        template="unhandled route exception",
+        properties={"request_id": request_id} if request_id else None,
+        mechanism={"type": "starlette", "handled": False},
+        dedupe_on_message=True,
+    )
+
+
 def _unhandled_exception_handler(client: PosthogErrorsClient):
     async def handler(request: Request, exc: Exception) -> PlainTextResponse:
         request_id = request.scope.get(_REQUEST_ID_SCOPE_KEY)
-        client.capture_exception(
-            (type(exc), exc, exc.__traceback__),
-            logger_name="fastapi",
-            template="unhandled route exception",
-            properties={"request_id": request_id} if request_id else None,
-            mechanism={"type": "starlette", "handled": False},
-            dedupe_on_message=True,
-        )
+        _report_unhandled(client, exc, request_id)
         # This runs outside RequestIdMiddleware, so the response must echo the id itself.
         headers = {_REQUEST_ID_HEADER: request_id} if request_id else None
         return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)

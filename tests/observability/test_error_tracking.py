@@ -603,3 +603,18 @@ class TestRequestContext:
     def test_route_exception_is_sent_once(self, monkeypatch):
         events = self._run(monkeypatch, _app(), ["/boom"])
         assert len(events) == 1
+
+    def test_route_crash_carries_the_request_breadcrumbs(self, monkeypatch):
+        app = FastAPI()
+
+        @app.get("/crash")
+        async def route():
+            add_breadcrumb(category="discogs", message="search_releases")
+            raise ValueError("crash")
+
+        (event,) = self._run(monkeypatch, app, ["/crash"])
+        props = event["properties"]
+        assert props["breadcrumb.discogs"] == "search_releases"
+        assert props["request_id"] == "crash"
+        mechanism = props["$exception_list"][0]["mechanism"]
+        assert (mechanism["type"], mechanism["handled"]) == ("starlette", False)
