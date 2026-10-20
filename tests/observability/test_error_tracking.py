@@ -95,6 +95,25 @@ class TestInit:
         client = _init(environment=given)
         assert client._base_properties["environment"] == expected
 
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            ("staging", "staging"),
+            ("Stage", "staging"),
+            (" stage ", "staging"),
+            ("production", "production"),
+            ("prod", "production"),
+            ("local", "development"),
+            ("qa", "qa"),
+        ],
+    )
+    def test_normalize_environment_is_public(self, given, expected):
+        assert observability.normalize_environment(given) == expected
+        assert "normalize_environment" in observability.__all__
+
+    def test_private_normalizer_name_is_still_an_alias(self):
+        assert et_module._normalize_environment is et_module.normalize_environment
+
     def test_unknown_environment_passes_through_with_one_warning(self, inner, caplog):
         with caplog.at_level(logging.WARNING, logger=et_module.__name__):
             client = _init(environment="qa")
