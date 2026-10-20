@@ -347,7 +347,27 @@ class TestAddBreadcrumbShim:
             add_breadcrumb(category="step", message="m" * 5000, data={"blob": "d" * 50000})
         (crumb,) = trail
         assert len(crumb["message"]) <= errors_module._MAX_BREADCRUMB_CHARS
+        assert isinstance(crumb["data"], str)
         assert len(crumb["data"]) <= errors_module._MAX_BREADCRUMB_CHARS
+
+    def test_snapshots_the_payload_against_later_mutation(self):
+        payload = {"q": "x"}
+        with errors_module.request_breadcrumbs() as trail:
+            add_breadcrumb(category="step", message="m", data=payload)
+            payload["q"] = "mutated"
+            payload["extra"] = 1
+        (crumb,) = trail
+        assert crumb["data"] == {"q": "x"}
+
+    def test_never_raises_when_a_payload_repr_raises(self):
+        class Unreprable:
+            def __repr__(self):
+                raise RuntimeError("boom")
+
+        with errors_module.request_breadcrumbs() as trail:
+            add_breadcrumb(category="step", message="m", data={"v": Unreprable()})
+        (crumb,) = trail
+        assert isinstance(crumb["data"], str)
 
 
 def _routes(app: FastAPI) -> FastAPI:

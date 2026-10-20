@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file. Format foll
 ### Changed
 - `add_breadcrumb` now records a real trail: each call appends `{category, message, level, data, timestamp}` to a per-request list in the package's own contextvar (opened by `RequestIdMiddleware`; last 50 kept, message and data size-bounded), and `PosthogErrorsClient` attaches it to `$exception` events only as the `breadcrumbs` property. It no longer calls `posthog.contexts.tag`, so breadcrumbs stop leaking into analytics events captured in the same request, `data` and `level` are kept, and two breadcrumbs of one category no longer overwrite each other. Outside a request a breadcrumb is still dropped. The `breadcrumb.<category>` event properties are gone; read `breadcrumbs` instead.
 
+### Consumer impact
+- Any dashboard, insight or query that read `breadcrumb.<category>` properties off analytics or exception events must read the `breadcrumbs` list on `$exception` events instead; the `breadcrumb.<category>` properties are no longer written. A breadcrumb `message` is now truncated to 1000 characters, and a `data` whose `repr` exceeds 1000 characters is stored as its truncated `repr` string. `data` is snapshotted at call time, so later mutation by the caller does not change the recorded crumb. Not tagged in this change.
+
 ## [2.0.0] - 2026-10-19
 
 ### Removed
