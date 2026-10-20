@@ -20,7 +20,7 @@ from posthog import contexts
 import wxyc_fastapi.observability as observability
 import wxyc_fastapi.observability.error_tracking as et_module
 import wxyc_fastapi.observability.errors as errors_module
-from wxyc_fastapi.observability import add_breadcrumb, capture_exception
+from wxyc_fastapi.observability import add_breadcrumb, capture_exception, set_error_tag
 from wxyc_fastapi.observability.error_tracking import init_error_tracking
 from wxyc_fastapi.observability.errors import (
     PosthogErrorsClient,
@@ -557,6 +557,16 @@ class TestDedupeKeys:
         assert all(len(k) < 300 for k in client._seen)
 
 
+class TestSetErrorTagOutsideRequest:
+    def test_is_a_noop_that_warns_once(self, caplog):
+        errors_module._warned_tag_outside_request = False
+        with caplog.at_level(logging.WARNING, logger=errors_module.logger.name):
+            set_error_tag("k", "v")
+            set_error_tag("k", "v")
+        assert errors_module._breadcrumbs_var.get() is None
+        assert len([r for r in caplog.records if "set_error_tag" in r.getMessage()]) == 1
+
+
 class TestRequestContext:
     """The middleware opens the posthog context, so routes never have to."""
 
@@ -660,6 +670,112 @@ class TestRequestContext:
             props = event["properties"]
             assert [c["message"] for c in props["breadcrumbs"]] == [f"crumb-{name}"]
             assert props["request_id"] == name
+
+    def test_error_tag_reaches_the_message_and_exception_events(self, monkeypatch):
+        app = FastAPI()
+
+        @app.get("/log")
+        async def route():
+            set_error_tag("lml.lookup.inflight_capped", "true")
+            logging.getLogger("svc.route").error("lookup failed")
+            capture_exception(ValueError("boom"))
+            return {}
+
+        events = self._run(monkeypatch, app, ["/log"])
+        assert len(events) == 2
+        assert [e["properties"]["lml.lookup.inflight_capped"] for e in events] == ["true", "true"]
+
+    def test_analytics_events_do_not_carry_error_tags(self, monkeypatch):
+        from posthog import Posthog
+
+        analytics: list[dict] = []
+
+        def keep(event):
+            analytics.append(event)
+            return None
+
+        sdk = Posthog("phc_analytics", before_send=keep, disable_geoip=True)
+        app = FastAPI()
+
+        @app.get("/lookup")
+        async def route():
+            set_error_tag("lml.lookup.inflight_capped", "true")
+            sdk.capture("lookup_completed", distinct_id="svc")
+            return {}
+
+        self._run(monkeypatch, app, ["/lookup"])
+        (event,) = analytics
+        assert "lml.lookup.inflight_capped" not in event["properties"]
+        assert not any("inflight_capped" in t for t in event["properties"]["$context_tags"])
+
+    def test_concurrent_requests_carry_only_their_own_error_tags(self, monkeypatch):
+        app = FastAPI()
+        gate = {"a": asyncio.Event(), "b": asyncio.Event()}
+
+        @app.get("/{name}")
+        async def route(name: str):
+            set_error_tag("tag", f"tag-{name}")
+            set_error_tag(f"only.{name}", "1")
+            gate[name].set()
+            await asyncio.wait_for(gate["a"].wait(), 5)
+            await asyncio.wait_for(gate["b"].wait(), 5)
+            capture_exception(ValueError(name))
+            return {}
+
+        events = self._run(monkeypatch, app, ["/a", "/b"])
+        by_value = {e["properties"]["$exception_list"][0]["value"]: e["properties"] for e in events}
+        assert set(by_value) == {"a", "b"}
+        for name, props in by_value.items():
+            other = "b" if name == "a" else "a"
+            assert props["tag"] == f"tag-{name}"
+            assert props[f"only.{name}"] == "1"
+            assert f"only.{other}" not in props
+
+    @pytest.mark.parametrize("use_log", [True, False], ids=["message-only", "exception"])
+    def test_error_tags_cannot_override_contract_fields(self, monkeypatch, use_log):
+        app = FastAPI()
+
+        @app.get("/x")
+        async def route():
+            for key in ("service", "environment", "release", "$process_person_profile"):
+                set_error_tag(key, "spoofed")
+            set_error_tag("request_id", "spoofed")
+            if use_log:
+                logging.getLogger("svc.route").error("lookup failed")
+            else:
+                capture_exception(ValueError("boom"))
+            return {}
+
+        (event,) = self._run(monkeypatch, app, ["/x"])
+        props = event["properties"]
+        assert props["service"] == "svc"
+        assert props["request_id"] == "x"
+        assert props["$process_person_profile"] is False
+        assert props["environment"] == "production"
+        assert props.get("release") != "spoofed"
+
+    def test_error_tag_value_is_truncated(self, monkeypatch):
+        app = FastAPI()
+
+        @app.get("/x")
+        async def route():
+            set_error_tag("big", "v" * 5000)
+            logging.getLogger("svc.route").error("lookup failed")
+            return {}
+
+        (event,) = self._run(monkeypatch, app, ["/x"])
+        assert event["properties"]["big"] == "v" * 200
+
+    def test_route_crash_carries_the_request_error_tags(self, monkeypatch):
+        app = FastAPI()
+
+        @app.get("/crash")
+        async def route():
+            set_error_tag("k", "v")
+            raise ValueError("crash")
+
+        (event,) = self._run(monkeypatch, app, ["/crash"])
+        assert event["properties"]["k"] == "v"
 
     def test_route_exception_is_sent_once(self, monkeypatch):
         events = self._run(monkeypatch, _app(), ["/boom"])

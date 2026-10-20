@@ -15,6 +15,7 @@ from wxyc_fastapi.observability.errors import (
     add_breadcrumb,
     capture_exception,
     get_posthog_errors_client,
+    set_error_tag,
     shutdown_posthog_errors,
 )
 from wxyc_fastapi.observability.posthog import (
@@ -43,6 +44,7 @@ __all__ = [
     "init_cache_stats",
     "init_error_tracking",
     "normalize_environment",
+    "set_error_tag",
     "shutdown_posthog",
     "shutdown_posthog_errors",
     "timed_api",
