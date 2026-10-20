@@ -66,3 +66,38 @@ def test_fixture_yields_a_stub(isolated_error_tracking_stub):
     assert _init() is not None
     logging.error("boom")
     assert isolated_error_tracking_stub.count("$exception") == 1
+
+
+def test_preinstalled_handler_does_not_swallow_events_and_is_restored():
+    root = logging.getLogger()
+    with isolated_error_tracking() as outer:
+        _init()
+        outer_handlers = list(root.handlers)
+        with isolated_error_tracking() as inner:
+            _init()
+            logging.error("inner boom")
+            assert inner.count("$exception") == 1
+        assert outer.count("$exception") == 0
+        assert list(root.handlers) == outer_handlers
+
+
+def test_hidden_pytest_does_not_break_import(monkeypatch):
+    import builtins
+    import importlib
+
+    import wxyc_fastapi.testing as testing_module
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "pytest" or name.startswith("pytest."):
+            raise ImportError("pytest hidden")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    try:
+        reloaded = importlib.reload(testing_module)
+        assert reloaded.CountingPosthog is not None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(testing_module)
