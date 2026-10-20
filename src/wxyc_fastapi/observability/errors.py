@@ -21,9 +21,10 @@ Every event carries ``service``, ``environment`` and ``$process_person_profile:
 false`` (plus ``release`` when known), and ``distinct_id`` is the service name.
 A send that raises is swallowed (fail-open), so no caller sees an SDK error.
 
-``capture_exception`` and ``add_breadcrumb`` are the call-site shims: the first reports
-through this client (a no-op until ``init_error_tracking`` has run), the second appends
-to the current request's breadcrumb trail (attached to ``$exception`` events only).
+``capture_exception``, ``add_breadcrumb`` and ``set_error_tag`` are the call-site shims: the
+first reports through this client (a no-op until ``init_error_tracking`` has run), the second
+appends to the current request's breadcrumb trail and the third sets a request tag (both
+attached to ``$exception`` events only).
 ``daily_ceiling`` has no default: the contract's sizes differ per service. The first
 ``get_posthog_errors_client`` call wins; a later call with different values logs one
 warning that they are ignored.
@@ -172,6 +173,7 @@ class PosthogErrorsClient:
         request_id = request_id_var.get()
         crumbs = _breadcrumbs_var.get()
         return {
+            **(_error_tags_var.get() or {}),
             **self._base_properties,
             **({"request_id": request_id} if request_id else {}),
             **({"breadcrumbs": list(crumbs)} if crumbs else {}),
@@ -347,17 +349,47 @@ _MAX_BREADCRUMB_CHARS = 1000
 _breadcrumbs_var: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
     "wxyc_fastapi_breadcrumbs", default=None
 )
+_MAX_TAG_CHARS = 200
+_error_tags_var: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "wxyc_fastapi_error_tags", default=None
+)
+_RESERVED_TAG_KEYS = frozenset(
+    {"service", "environment", "release", "$process_person_profile", "request_id", "breadcrumbs"}
+)
+_warned_tag_outside_request = False
 
 
 @contextlib.contextmanager
 def request_breadcrumbs() -> Iterator[list[dict[str, Any]]]:
-    """Open a fresh per-request breadcrumb trail; ``RequestIdMiddleware`` wraps each request in one."""
+    """Open a fresh per-request breadcrumb trail and error-tag dict; ``RequestIdMiddleware`` wraps each request in one."""
     trail: list[dict[str, Any]] = []
     token = _breadcrumbs_var.set(trail)
+    tags_token = _error_tags_var.set({})
     try:
         yield trail
     finally:
+        _error_tags_var.reset(tags_token)
         _breadcrumbs_var.reset(token)
+
+
+def set_error_tag(key: str, value: str) -> None:
+    """Tag the current request's ``$exception`` events with ``key`` = ``value``.
+
+    Like the breadcrumb trail, the tags live in this package's own contextvar, opened per
+    request by ``RequestIdMiddleware``, and never reach analytics events. The contract fields
+    (``service``, ``environment``, ``release``, ``$process_person_profile``, ``request_id``)
+    and ``breadcrumbs`` cannot be tagged: such a key is ignored. ``value`` is truncated to 200 characters. Outside a
+    request the call is dropped, with one warning per process.
+    """
+    global _warned_tag_outside_request  # noqa: PLW0603
+    tags = _error_tags_var.get()
+    if tags is None:
+        if not _warned_tag_outside_request:
+            _warned_tag_outside_request = True
+            logger.warning("set_error_tag called outside a request; tag dropped")
+        return
+    if key not in _RESERVED_TAG_KEYS:
+        tags[key] = str(value)[:_MAX_TAG_CHARS]
 
 
 def add_breadcrumb(
