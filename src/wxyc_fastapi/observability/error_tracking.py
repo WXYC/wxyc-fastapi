@@ -80,7 +80,7 @@ def init_error_tracking(
     """
     client = get_posthog_errors_client(
         service=service,
-        environment=_normalize_environment(environment),
+        environment=normalize_environment(environment),
         daily_ceiling=daily_ceiling,
         release=release,
         before_send=before_send,
@@ -97,7 +97,11 @@ def init_error_tracking(
     return client
 
 
-def _normalize_environment(value: str) -> str:
+def normalize_environment(value: str) -> str:
+    """Map an environment name to ``production``, ``staging`` or ``development``; pass an unknown one through with one warning.
+
+    Public so a consumer can branch on ``normalize_environment(env) == "staging"`` (for a smaller ``daily_ceiling``) with the same alias table the ``environment`` event tag uses.
+    """
     mapped = _ENVIRONMENT_ALIASES.get(value.strip().lower())
     if mapped is not None:
         return mapped
@@ -109,6 +113,9 @@ def _normalize_environment(value: str) -> str:
             value,
         )
     return value
+
+
+_normalize_environment = normalize_environment
 
 
 class RequestIdMiddleware:

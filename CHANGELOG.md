@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file. Format foll
 ## [Unreleased]
 
 ### Added
+- `normalize_environment(value) -> str`, exported from `wxyc_fastapi.observability`: the environment alias table `init_error_tracking` uses for the `environment` tag (`prod`/`stage`/`dev`/`local` and case/whitespace variants map to `production`/`staging`/`development`; an unknown value passes through with one warning). Consumers can branch on `normalize_environment(env) == "staging"` for a staging `daily_ceiling` instead of copying the alias table. `_normalize_environment` remains as an alias. Consumer impact: none until adopted.
 - `wxyc_fastapi.testing.isolated_error_tracking(stub=None)` and the `isolated_error_tracking_stub` pytest fixture: run a test against a fresh error-tracking singleton wired to a `CountingPosthog`, with root handlers, both excepthooks, the hooks-installed flag and the singleton restored on exit. Consumers no longer need to reach into private names in wiring tests. Consumer impact: none until adopted.
 
 ### Changed
