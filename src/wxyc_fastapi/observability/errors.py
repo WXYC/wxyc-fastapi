@@ -22,8 +22,8 @@ false`` (plus ``release`` when known), and ``distinct_id`` is the service name.
 A send that raises is swallowed (fail-open), so no caller sees an SDK error.
 
 ``capture_exception`` and ``add_breadcrumb`` are the call-site shims: the first reports
-through this client (a no-op until ``init_error_tracking`` has run), the second tags the
-current ``posthog.contexts`` context.
+through this client (a no-op until ``init_error_tracking`` has run), the second appends
+to the current request's breadcrumb trail (attached to ``$exception`` events only).
 ``daily_ceiling`` has no default: the contract's sizes differ per service. The first
 ``get_posthog_errors_client`` call wins; a later call with different values logs one
 warning that they are ignored.
@@ -374,13 +374,22 @@ def add_breadcrumb(
     events only, as the ``breadcrumbs`` property, and never reaches analytics events.
     The last 50 entries are kept; ``message`` is truncated to 1000 characters and a
     ``data`` whose ``repr`` exceeds that becomes its truncated ``repr`` string.
-    Outside a request the breadcrumb is dropped.
+    Outside a request the breadcrumb is dropped. Never raises: a ``data`` whose ``repr``
+    raises is recorded as a placeholder string.
     """
     trail = _breadcrumbs_var.get()
     if trail is None:
         return
-    if data is not None and len(repr(data)) > _MAX_BREADCRUMB_CHARS:
-        data = repr(data)[:_MAX_BREADCRUMB_CHARS]  # type: ignore[assignment]
+    if data is not None:
+        try:
+            rendered = repr(data)
+        except Exception:
+            data = "<unrepresentable>"  # type: ignore[assignment]
+        else:
+            if len(rendered) > _MAX_BREADCRUMB_CHARS:
+                data = rendered[:_MAX_BREADCRUMB_CHARS]  # type: ignore[assignment]
+            else:
+                data = dict(data)  # snapshot: later caller mutation must not change the crumb
     trail.append(
         {
             "category": category,
