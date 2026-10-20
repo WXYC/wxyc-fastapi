@@ -558,12 +558,12 @@ class TestDedupeKeys:
 
 
 class TestSetErrorTagOutsideRequest:
-    def test_is_a_noop_that_warns_once(self, caplog):
-        errors_module._warned_tag_outside_request = False
+    def test_is_a_noop_that_warns_once(self, caplog, monkeypatch):
+        monkeypatch.setattr(errors_module, "_warned_tag_outside_request", False)
         with caplog.at_level(logging.WARNING, logger=errors_module.logger.name):
             set_error_tag("k", "v")
             set_error_tag("k", "v")
-        assert errors_module._breadcrumbs_var.get() is None
+        assert errors_module._error_tags_var.get() is None
         assert len([r for r in caplog.records if "set_error_tag" in r.getMessage()]) == 1
 
 
@@ -753,6 +753,27 @@ class TestRequestContext:
         assert props["$process_person_profile"] is False
         assert props["environment"] == "production"
         assert props.get("release") != "spoofed"
+
+    @pytest.mark.parametrize("use_log", [True, False], ids=["message-only", "exception"])
+    def test_error_tags_cannot_override_call_properties(self, monkeypatch, use_log):
+        app = FastAPI()
+
+        @app.get("/x")
+        async def route():
+            for key in ("logger", "request", "$exception_fingerprint", "$exception_level"):
+                set_error_tag(key, "spoofed")
+            if use_log:
+                logging.getLogger("svc.route").error("lookup failed")
+            else:
+                capture_exception(ValueError("boom"), {"k": "v"})
+            return {}
+
+        (event,) = self._run(monkeypatch, app, ["/x"])
+        props = event["properties"]
+        assert props["logger"] != "spoofed"
+        assert props["$exception_level"] == "error"
+        assert props.get("$exception_fingerprint") != "spoofed"
+        assert use_log or props["request"] == {"k": "v"}
 
     def test_error_tag_value_is_truncated(self, monkeypatch):
         app = FastAPI()
