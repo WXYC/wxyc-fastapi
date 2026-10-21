@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. Format foll
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-21
+
 ### Added
 - `set_error_tag(key, value)`, exported from `wxyc_fastapi.observability`: an errors-only request tag. The pair is stored in a per-request dict in the package's own contextvar (opened by `RequestIdMiddleware` beside the breadcrumb trail) and `PosthogErrorsClient` merges it into `$exception` events only, on both the exception and message-only paths. The contract fields (`service`, `environment`, `release`, `$process_person_profile`, `request_id`) are applied after the tags, and a tag named like one of them, `breadcrumbs`, `logger` or any `$`-prefixed key is ignored, so a tag cannot override or fill in a contract field or a property the call passes in. Values are cut to 200 characters; outside a request the call is dropped with one warning per process. Consumer impact: none until adopted; it replaces `posthog.contexts.tag` for tags that must not leak into analytics events.
 - `normalize_environment(value) -> str`, exported from `wxyc_fastapi.observability`: the environment alias table `init_error_tracking` uses for the `environment` tag (`prod`/`stage`/`dev`/`local` and case/whitespace variants map to `production`/`staging`/`development`; an unknown value passes through with one warning). Consumers can branch on `normalize_environment(env) == "staging"` for a staging `daily_ceiling` instead of copying the alias table. `_normalize_environment` remains as an alias. Consumer impact: none until adopted.
@@ -14,7 +16,10 @@ All notable changes to this project will be documented in this file. Format foll
 - `add_breadcrumb` now records a real trail: each call appends `{category, message, level, data, timestamp}` to a per-request list in the package's own contextvar (opened by `RequestIdMiddleware`; last 50 kept, message and data size-bounded), and `PosthogErrorsClient` attaches it to `$exception` events only as the `breadcrumbs` property. It no longer calls `posthog.contexts.tag`, so breadcrumbs stop leaking into analytics events captured in the same request, `data` and `level` are kept, and two breadcrumbs of one category no longer overwrite each other. Outside a request a breadcrumb is still dropped. The `breadcrumb.<category>` event properties are gone; read `breadcrumbs` instead.
 
 ### Consumer impact
-- Any dashboard, insight or query that read `breadcrumb.<category>` properties off analytics or exception events must read the `breadcrumbs` list on `$exception` events instead; the `breadcrumb.<category>` properties are no longer written. A breadcrumb `message` is now truncated to 1000 characters, and a `data` whose `repr` exceeds 1000 characters is stored as its truncated `repr` string. `data` is snapshotted at call time, so later mutation by the caller does not change the recorded crumb. Not tagged in this change.
+- Any dashboard, insight or query that read `breadcrumb.<category>` properties off analytics or exception events must read the `breadcrumbs` list on `$exception` events instead; the `breadcrumb.<category>` properties are no longer written. A breadcrumb `message` is now truncated to 1000 characters, and a `data` whose `repr` exceeds 1000 characters is stored as its truncated `repr` string. `data` is snapshotted at call time, so later mutation by the caller does not change the recorded crumb.
+- Why this is a minor (2.1.0) and not a major, although the `breadcrumb.<category>` properties are removed: no code API changed. `add_breadcrumb` keeps its signature and import path, every other public name is unchanged or new, and no consumer code stops importing, type-checking or running. What changed is the event properties the package writes, which are telemetry output and not part of the Python API that SemVer versions here. Consumers move their pin from `>=2.0.0,<3.0.0` to `>=2.1.0,<3.0.0` only when they adopt `set_error_tag`, `normalize_environment` or `isolated_error_tracking`.
+
+[2.1.0]: https://github.com/WXYC/wxyc-fastapi/releases/tag/v2.1.0
 
 ## [2.0.0] - 2026-10-19
 
